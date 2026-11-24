@@ -135,7 +135,7 @@ fn csv_fields(line: &str) -> Vec<String> {
 
 fn process_names() -> HashMap<u32, (String, String)> {
     let Ok(output) = Command::new("/bin/ps")
-        .args(["-axo", "pid=,comm=,user="])
+        .args(["-axww", "-o", "pid=,user=,comm="])
         .output()
     else {
         return HashMap::new();
@@ -145,7 +145,8 @@ fn process_names() -> HashMap<u32, (String, String)> {
         .filter_map(|line| {
             let (pid, rest) = line.trim().split_once(char::is_whitespace)?;
             let pid = pid.parse::<u32>().ok()?;
-            let (command, user) = rest.trim().rsplit_once(char::is_whitespace)?;
+            // user first, then the full command path, which may contain spaces
+            let (user, command) = rest.trim().split_once(char::is_whitespace)?;
             let name = command.trim().rsplit('/').next()?.to_string();
             Some((pid, (name, user.trim().to_string())))
         })

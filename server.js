@@ -65,7 +65,7 @@ async function explain(item) {
     think: false,
     options: { temperature: 0.2, num_predict: 400 },
     messages: [
-      { role: 'system', content: 'You explain network activity on a personal Mac to its owner, calmly and plainly, in Russian, without long dashes. Use only the facts given. If you do not know who owns an address, say so. Never claim something is malicious without evidence. Answer in at most four short sentences: what this probably is, whether it looks normal, and one thing to check if unsure.' },
+      { role: 'system', content: 'You explain network activity on a personal Mac to its owner, calmly and plainly, in English, without long dashes. Use only the facts given. If you do not know who owns an address, say so. Never claim something is malicious without evidence. Answer in at most four short sentences: what this probably is, whether it looks normal, and one thing to check if unsure.' },
       { role: 'user', content: facts },
     ],
   };

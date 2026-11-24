@@ -71,8 +71,8 @@ function renderProcesses(processes, sampledAt) {
   processList.innerHTML = rows.length ? rows.map((row) => `<tr><th scope="row"><span class="process-name">${esc(row.process)}</span><small>PID ${esc(row.pid)}</small></th><td>${formatBytes(row.receivedBytes)}</td><td>${formatBytes(row.sentBytes)}</td><td>${Number(row.receivedPackets).toLocaleString()}</td><td>${Number(row.sentPackets).toLocaleString()}</td><td><span class="rate-in">↓ ${formatRate(row.receivedRate)}</span><small class="rate-out">↑ ${formatRate(row.sentRate)}</small></td></tr>`).join('') : '<tr><td colspan="6" class="empty-cell">No process counters are visible right now.</td></tr>';
   lastMetricSample = sampledAt;
 }
-function addEvent(text, date = new Date()) {
-  history.unshift({ text, time: date });
+function addEvent(text, date = new Date(), meta = {}) {
+  history.unshift({ text, time: date, ...meta });
   history.splice(60);
   renderEvents();
 }
@@ -98,11 +98,11 @@ async function refresh() {
       const old = new Set(activeRows.map((row) => [row.pid, row.protocol, row.local, row.remote].join('|')));
       for (const row of rows) {
         const key = [row.pid, row.protocol, row.local, row.remote].join('|');
-        if (!old.has(key)) addEvent(`${row.process} opened a connection to ${row.remote}`);
+        if (!old.has(key)) addEvent(`${row.process} opened a connection to ${row.remote}`, new Date(), { kind: 'open', process: row.process, pid: row.pid, remote: row.remote, local: row.local, protocol: row.protocol });
       }
       for (const row of activeRows) {
         const key = [row.pid, row.protocol, row.local, row.remote].join('|');
-        if (!now.has(key)) addEvent(`${row.process} connection to ${row.remote} is no longer open`);
+        if (!now.has(key)) addEvent(`${row.process} connection to ${row.remote} is no longer open`, new Date(), { kind: 'close', process: row.process, pid: row.pid, remote: row.remote, local: row.local, protocol: row.protocol });
       }
     }
     renderConnections(rows);
