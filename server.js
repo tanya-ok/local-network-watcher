@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { reverse } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +27,8 @@ function resetCapture() {
 }
 
 const TSHARK = '/Applications/Wireshark.app/Contents/MacOS/tshark';
-const FIELDS = ['frame.number', 'frame.time_relative', 'frame.len', 'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport', '_ws.col.Protocol', 'dns.qry.name', 'tls.handshake.extensions_server_name', 'http.host', '_ws.col.Info'];
-const KEYS = ['frame', 'time', 'len', 'ipSrc', 'ipDst', 'ipv6Src', 'ipv6Dst', 'tcpSrc', 'tcpDst', 'udpSrc', 'udpDst', 'protocol', 'dnsQry', 'tlsSNI', 'httpHost', 'info'];
+const FIELDS = ['frame.number', 'frame.time_relative', 'frame.len', 'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport', '_ws.col.Protocol', 'dns.qry.name', 'tls.handshake.extensions_server_name', 'http.host', '_ws.col.Info', 'eth.src', 'eth.dst', 'ip.ttl', 'tcp.flags.str', 'tls.record.version'];
+const KEYS = ['frame', 'time', 'len', 'ipSrc', 'ipDst', 'ipv6Src', 'ipv6Dst', 'tcpSrc', 'tcpDst', 'udpSrc', 'udpDst', 'protocol', 'dnsQry', 'tlsSNI', 'httpHost', 'info', 'ethSrc', 'ethDst', 'ttl', 'tcpFlags', 'tlsVersion'];
 
 function parsePacket(line) {
   const fields = line.split('\t');
@@ -37,6 +38,57 @@ function parsePacket(line) {
 async function listInterfaces() {
   const { stdout } = await exec(TSHARK, ['-D'], { timeout: 5000 });
   return stdout.split('\n').map((line) => line.match(/^\d+\.\s+(\S+)(?:\s+\((.*)\))?\s*$/)).filter(Boolean).map((m) => ({ name: m[1], description: m[2] || '' }));
+}
+
+const nameCache = new Map();
+async function reverseName(ip) {
+  if (nameCache.has(ip)) return nameCache.get(ip);
+  let name = '';
+  try {
+    const names = await Promise.race([reverse(ip), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500))]);
+    name = names[0] || '';
+  } catch { name = ''; }
+  nameCache.set(ip, name);
+  return name;
+}
+
+// Explanations come only from a model on this Mac (Ollama on loopback).
+const EXPLAIN_URL = 'http://127.0.0.1:11434/api/chat';
+const EXPLAIN_MODEL = process.env.EXPLAIN_MODEL || 'gemma4:26b';
+let explaining = false;
+async function explain(item) {
+  const facts = Object.entries(item).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `${k}: ${String(v).slice(0, 200)}`).join('\n');
+  const body = {
+    model: EXPLAIN_MODEL,
+    stream: false,
+    think: false,
+    options: { temperature: 0.2, num_predict: 400 },
+    messages: [
+      { role: 'system', content: 'You explain network activity on a personal Mac to its owner, calmly and plainly, in Russian, without long dashes. Use only the facts given. If you do not know who owns an address, say so. Never claim something is malicious without evidence. Answer in at most four short sentences: what this probably is, whether it looks normal, and one thing to check if unsure.' },
+      { role: 'user', content: facts },
+    ],
+  };
+  const res = await fetch(EXPLAIN_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(120000) });
+  if (!res.ok) throw new Error(`Local model returned ${res.status}`);
+  const data = await res.json();
+  return { text: data.message?.content?.trim() || 'No answer.', model: EXPLAIN_MODEL };
+}
+
+const ownerCache = new Map();
+async function ownerOf(ip) {
+  if (ownerCache.has(ip)) return ownerCache.get(ip);
+  let owner = { org: '', country: '', network: '' };
+  try {
+    const { stdout } = await exec('/usr/bin/whois', [ip], { timeout: 8000, maxBuffer: 1024 * 1024 });
+    const pick = (re) => (stdout.match(re) || [])[1]?.trim() || '';
+    owner = {
+      org: pick(/^(?:OrgName|org-name|Organization|owner|descr):\s*(.+)$/im),
+      country: pick(/^(?:Country|country):\s*(\S+)/im),
+      network: pick(/^(?:NetName|netname):\s*(.+)$/im),
+    };
+  } catch { /* whois unavailable */ }
+  ownerCache.set(ip, owner);
+  return owner;
 }
 
 async function activeConnections() {
@@ -67,6 +119,44 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
+    }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/owner') {
+    const ip = new URL(req.url, 'http://localhost').searchParams.get('ip') || '';
+    if (!/^[0-9a-fA-F:.]{3,45}$/.test(ip)) { res.writeHead(400).end('{}'); return; }
+    const [owner, name] = await Promise.all([ownerOf(ip), reverseName(ip)]);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...owner, reverseDns: name }));
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/names') {
+    const ips = (new URL(req.url, 'http://localhost').searchParams.get('ips') || '').split(',').filter((ip) => /^[0-9a-fA-F:.]{3,45}$/.test(ip)).slice(0, 60);
+    const out = {};
+    await Promise.all(ips.map(async (ip) => { out[ip] = await reverseName(ip); }));
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(out));
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/explain') {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) {
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'Explanations can only be requested from this page.' }));
+      return;
+    }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 4096) break; }
+    if (explaining) {
+      res.writeHead(429, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'One explanation at a time.' }));
+      return;
+    }
+    explaining = true;
+    try {
+      const item = JSON.parse(body || '{}');
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Nothing to explain.');
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(await explain(item)));
+    } catch (e) {
+      res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message }));
+    } finally {
+      explaining = false;
     }
     return;
   }

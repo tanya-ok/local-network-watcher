@@ -274,3 +274,229 @@ cap.rows.addEventListener('click', (e) => { const tr = e.target.closest('tr[data
 cap.rows.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); } });
 loadInterfaces();
 pollCapture();
+
+// Map and local explanations
+const mapSvg = document.querySelector('#map-svg');
+const mapDetail = document.querySelector('#map-detail');
+const mapScope = document.querySelector('#map-scope');
+const names = new Map();
+const PORTS = { 443: 'HTTPS', 80: 'HTTP', 53: 'DNS', 853: 'DNS over TLS', 993: 'IMAP mail', 587: 'SMTP mail', 22: 'SSH', 5223: 'Apple push', 123: 'Time sync', 3478: 'Calls and video' };
+let mapModel = { apps: [], dests: [], links: [] };
+
+function hostOf(endpoint) {
+  const s = String(endpoint || '');
+  const i = s.lastIndexOf(':');
+  return (i < 0 ? s : s.slice(0, i)).replace(/^\[|\]$/g, '');
+}
+function isPrivate(ip) {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|fc|fd)/i.test(ip);
+}
+function sniNames() {
+  const out = new Map();
+  for (const p of capPackets) {
+    const n = p.tlsSNI || p.httpHost;
+    if (n && p.dst) out.set(p.dst, n);
+  }
+  return out;
+}
+function destLabel(ip) {
+  if (isPrivate(ip)) return 'local network';
+  return sniNames().get(ip) || names.get(ip) || ip;
+}
+async function lookupNames(ips) {
+  const missing = ips.filter((ip) => !names.has(ip) && !isPrivate(ip)).slice(0, 60);
+  if (!missing.length) return;
+  try {
+    const res = await fetch(`/api/names?ips=${encodeURIComponent(missing.join(','))}`, { cache: 'no-store' });
+    const data = await res.json();
+    for (const [ip, n] of Object.entries(data)) names.set(ip, n);
+    renderMap();
+  } catch { /* names are optional */ }
+}
+function buildMap() {
+  const internetOnly = mapScope.value === 'internet';
+  const capBytes = new Map();
+  for (const p of capPackets) {
+    if (!p.process) continue;
+    for (const ip of [p.src, p.dst]) {
+      if (!ip) continue;
+      const key = `${p.process}|${ip}`;
+      capBytes.set(key, (capBytes.get(key) || 0) + (Number(p.len) || 0));
+    }
+  }
+  const links = new Map();
+  for (const row of activeRows) {
+    const ip = hostOf(row.remote);
+    if (!ip || (internetOnly && isPrivate(ip))) continue;
+    const key = `${row.process}|${ip}`;
+    const link = links.get(key) || { app: row.process, ip, count: 0, ports: new Set(), protocols: new Set(), pids: new Set(), states: new Set() };
+    link.count += 1;
+    link.ports.add(portOf(row.remote));
+    link.protocols.add(row.protocol);
+    link.pids.add(row.pid);
+    link.states.add(row.state);
+    links.set(key, link);
+  }
+  const all = [...links.values()].map((l) => ({ ...l, bytes: capBytes.get(`${l.app}|${l.ip}`) || 0 }));
+  const appTotals = new Map();
+  const destTotals = new Map();
+  for (const l of all) {
+    appTotals.set(l.app, (appTotals.get(l.app) || 0) + l.count);
+    destTotals.set(l.ip, (destTotals.get(l.ip) || 0) + l.count);
+  }
+  const apps = [...appTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 16).map(([name]) => name);
+  const dests = [...destTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 18).map(([ip]) => ip);
+  const shown = all.filter((l) => apps.includes(l.app) && dests.includes(l.ip));
+  return { apps, dests, links: shown, hiddenApps: appTotals.size - apps.length, hiddenDests: destTotals.size - dests.length };
+}
+function svgEl(tag, attrs, text) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text != null) el.textContent = text;
+  return el;
+}
+function cut(text, n) {
+  const s = String(text);
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+function renderMap() {
+  if (!document.querySelector('#map').classList.contains('active-view')) return;
+  mapModel = buildMap();
+  const { apps, dests, links } = mapModel;
+  const rowH = 30;
+  const rows = Math.max(apps.length, dests.length, 1);
+  const height = rows * rowH + 40;
+  const W = 900, leftX = 250, rightX = 650;
+  mapSvg.setAttribute('viewBox', `0 0 ${W} ${height}`);
+  mapSvg.replaceChildren();
+  if (!links.length) {
+    mapSvg.append(svgEl('text', { x: W / 2, y: 40, 'text-anchor': 'middle', class: 'map-empty' }, activeRows.length ? 'No internet connections right now.' : 'Waiting for the first snapshot…'));
+    return;
+  }
+  const yApp = (i) => 30 + i * rowH + (rows - apps.length) * rowH / 2;
+  const yDest = (i) => 30 + i * rowH + (rows - dests.length) * rowH / 2;
+  const useBytes = links.some((l) => l.bytes > 0);
+  const maxW = Math.max(...links.map((l) => (useBytes ? l.bytes : l.count)));
+  const lineLayer = svgEl('g', { class: 'map-lines' });
+  for (const l of links) {
+    const y1 = yApp(apps.indexOf(l.app));
+    const y2 = yDest(dests.indexOf(l.ip));
+    const v = useBytes ? l.bytes : l.count;
+    const w = 1.2 + 6 * Math.sqrt(v / maxW);
+    const path = svgEl('path', { d: `M ${leftX + 8} ${y1} C ${leftX + 160} ${y1}, ${rightX - 160} ${y2}, ${rightX - 8} ${y2}`, 'stroke-width': w.toFixed(1), class: 'map-line', tabindex: 0, 'data-key': `${l.app}|${l.ip}` });
+    path.append(svgEl('title', {}, `${l.app} to ${destLabel(l.ip)}: ${l.count} connection${l.count > 1 ? 's' : ''}`));
+    lineLayer.append(path);
+  }
+  mapSvg.append(lineLayer);
+  apps.forEach((a, i) => {
+    const g = svgEl('g', { class: 'map-node', tabindex: 0, 'data-app': a });
+    g.append(svgEl('circle', { cx: leftX, cy: yApp(i), r: 5 }), svgEl('text', { x: leftX - 14, y: yApp(i) + 4, 'text-anchor': 'end' }, cut(a, 30)));
+    mapSvg.append(g);
+  });
+  dests.forEach((ip, i) => {
+    const g = svgEl('g', { class: `map-node${isPrivate(ip) ? ' local' : ''}`, tabindex: 0, 'data-ip': ip });
+    g.append(svgEl('circle', { cx: rightX, cy: yDest(i), r: 5 }), svgEl('text', { x: rightX + 14, y: yDest(i) + 4 }, cut(destLabel(ip), 34)));
+    mapSvg.append(g);
+  });
+  lookupNames(dests);
+}
+function selectOnMap({ app, ip }) {
+  mapSvg.querySelectorAll('.map-line').forEach((p) => {
+    const [a, d] = p.dataset.key.split('|');
+    p.classList.toggle('dim', !((!app || a === app) && (!ip || d === ip)));
+  });
+  const related = mapModel.links.filter((l) => (!app || l.app === app) && (!ip || l.ip === ip));
+  const item = { kind: app && ip ? 'connection' : app ? 'app' : 'destination' };
+  if (app) item.app = app;
+  if (ip) { item.address = ip; item.reverse_dns = names.get(ip) || ''; item.tls_server_name = sniNames().get(ip) || ''; }
+  item.ports = [...new Set(related.flatMap((l) => [...l.ports]))].map((p) => (PORTS[p] ? `${p} (${PORTS[p]})` : p)).join(', ');
+  item.protocols = [...new Set(related.flatMap((l) => [...l.protocols]))].join(', ');
+  item.connections = related.reduce((s, l) => s + l.count, 0);
+  if (!ip) item.destinations = related.map((l) => destLabel(l.ip)).slice(0, 12).join(', ');
+  if (!app) item.apps = [...new Set(related.map((l) => l.app))].join(', ');
+  const bytes = related.reduce((s, l) => s + l.bytes, 0);
+  if (bytes) item.bytes_in_last_capture = bytes;
+  const rows = Object.entries(item).filter(([k, v]) => k !== 'kind' && v !== '' && v != null);
+  const socketRows = app && ip ? activeRows.filter((r) => r.process === app && hostOf(r.remote) === ip).slice(0, 4) : [];
+  const socketHtml = socketRows.length ? `<div class="socket-diagram">${socketRows.map((r) => `<div class="socket-row"><span class="sock-end">${esc(r.process)}<small>${esc(r.local)}</small></span><span class="sock-pipe">${esc(r.protocol)} · ${esc(r.state)}</span><span class="sock-end">${esc(destLabel(ip))}<small>${esc(r.remote)}</small></span></div>`).join('')}<p class="learn-note"><b>Socket</b> is one end of a conversation: an IP address plus a port. A connection is a pair of sockets. macOS knows which app owns the local socket, which is how this map knows who talks to whom.</p></div>` : '';
+  const judge = ip && !isPrivate(ip) ? `<div class="judge"><b>How to judge an address</b><ul><li>Who owns it: <span class="owner-line">looking up…</span></li><li>Does the owner fit the app? A password manager talking to Amazon CloudFront is normal; a calculator talking to an unknown host abroad is not.</li><li>Port 443 is ordinary encrypted web traffic. Unusual ports deserve a second look.</li><li>New, at night, or from an app that never went online before: worth a check, not proof of harm.</li></ul><small>Owner lookup asks the public internet registry (whois) about this address.</small></div>` : '';
+  mapDetail.innerHTML = `<div class="inspector-grid">${rows.map(([k, v]) => `<div><span>${esc(k.replace(/_/g, ' '))}</span><strong>${esc(v)}</strong></div>`).join('')}</div>${socketHtml}${judge}${explainBlock()}`;
+  bindExplain(mapDetail, item);
+  if (judge) {
+    fetch(`/api/owner?ip=${encodeURIComponent(ip)}`, { cache: 'no-store' }).then((r) => r.json()).then((o) => {
+      const line = mapDetail.querySelector('.owner-line');
+      if (!line) return;
+      line.textContent = [o.org || o.network || 'unknown', o.country, o.reverseDns].filter(Boolean).join(' · ');
+      item.owner = o.org || o.network || '';
+      item.owner_country = o.country || '';
+      item.reverse_dns = o.reverseDns || item.reverse_dns;
+    }).catch(() => { const line = mapDetail.querySelector('.owner-line'); if (line) line.textContent = 'lookup failed'; });
+  }
+}
+function explainBlock() {
+  return '<div class="explain"><button class="cap-button explain-button" type="button">Explain with local AI</button><p class="explain-text" aria-live="polite"></p></div>';
+}
+function bindExplain(container, item) {
+  const button = container.querySelector('.explain-button');
+  const out = container.querySelector('.explain-text');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    out.textContent = 'Asking the model on this Mac…';
+    try {
+      const res = await fetch('/api/explain', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(item) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'The local model did not answer.');
+      out.textContent = data.text;
+      out.dataset.model = data.model;
+    } catch (e) {
+      out.textContent = `${e.message} Check that Ollama is running on this Mac.`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+mapSvg.addEventListener('click', (e) => {
+  const line = e.target.closest('.map-line');
+  if (line) { const [app, ip] = line.dataset.key.split('|'); selectOnMap({ app, ip }); return; }
+  const node = e.target.closest('.map-node');
+  if (node) selectOnMap(node.dataset.app ? { app: node.dataset.app } : { ip: node.dataset.ip });
+});
+mapSvg.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+mapScope.addEventListener('change', renderMap);
+document.querySelector('a[href="#map"]').addEventListener('click', () => setTimeout(renderMap, 0));
+setInterval(renderMap, 3000);
+
+// Explain a captured packet too
+const baseShowPacket = showPacket;
+showPacket = function (i) {
+  baseShowPacket(i);
+  const p = capPackets[i];
+  if (!p) return;
+  cap.detail.insertAdjacentHTML('beforeend', layersHtml(p) + explainBlock());
+  bindExplain(cap.detail, { kind: 'packet', process: p.process, source: p.srcName || p.src, destination: p.dstName || p.dst, source_port: p.sport, destination_port: p.dport, protocol: p.protocol, length: p.len, dns_question: p.dnsQry, tls_server_name: p.tlsSNI, info: p.info });
+};
+
+const APP_PROTOCOLS = {
+  TLS: 'TLS wraps the conversation in encryption. You can see who it talks to (server name), not what it says.',
+  'TLSv1.2': 'TLS 1.2 encryption. Content is hidden; the server name is often visible in the first message.',
+  'TLSv1.3': 'TLS 1.3 encryption, the modern version. Content is hidden.',
+  QUIC: 'QUIC is encrypted web traffic over UDP, used by browsers and Google, Apple and Cloudflare services.',
+  DNS: 'DNS turns a name like apple.com into an IP address. It is how apps find servers.',
+  HTTP: 'Plain HTTP, not encrypted. Anyone on the network path can read it.',
+  MDNS: 'mDNS finds devices on the local network, like printers and AirPlay speakers.',
+  ICMP: 'ICMP carries network status messages, such as ping replies.',
+  ARP: 'ARP asks which device on the Wi-Fi owns an IP address.',
+};
+function layersHtml(p) {
+  const transport = p.tcpSrc ? 'TCP' : p.udpSrc ? 'UDP' : '';
+  const app = p.protocol && p.protocol !== transport ? p.protocol : '';
+  const appText = APP_PROTOCOLS[app] || (app ? `${app} is the application protocol in this packet.` : 'No application data in this packet; it only manages the connection.');
+  const layers = [
+    ['7 Application', app || 'none', [p.tlsSNI && `server name ${p.tlsSNI}`, p.dnsQry && `asks for ${p.dnsQry}`, p.httpHost && `host ${p.httpHost}`, p.tlsVersion && `record ${p.tlsVersion}`].filter(Boolean).join(' · '), appText],
+    ['4 Transport', transport || p.protocol, [p.sport && `port ${p.sport} → ${p.dport}`, p.tcpFlags && `flags ${p.tcpFlags}`].filter(Boolean).join(' · '), transport === 'TCP' ? 'TCP delivers bytes in order and resends what is lost. Flags like SYN, ACK and FIN open, confirm and close the conversation. Ports say which app on each side.' : transport === 'UDP' ? 'UDP sends single messages without a connection. Fast, used for DNS, calls and QUIC.' : 'No transport layer in this packet.'],
+    ['3 Network', p.src && p.src.includes(':') ? 'IPv6' : 'IPv4', [p.src && `${p.src} → ${p.dst}`, p.ttl && `TTL ${p.ttl}`].filter(Boolean).join(' · '), 'IP addresses route the packet across networks, router by router. TTL counts down at each hop so lost packets do not loop forever.'],
+    ['2 Link', 'Wi-Fi / Ethernet', [p.ethSrc && `${p.ethSrc} → ${p.ethDst}`].filter(Boolean).join(''), 'MAC addresses move the packet one hop, from your Mac to the router. They change at every hop; IP addresses do not.'],
+    ['1 Physical', 'radio or cable', `${p.len} bytes on the wire`, 'The bits themselves: radio waves on Wi-Fi, light or voltage on a cable.'],
+  ];
+  return `<div class="layers"><b>This packet, layer by layer (OSI model)</b>${layers.map(([name, proto, values, text]) => `<details class="layer"><summary><span class="layer-name">${esc(name)}</span><span class="layer-proto">${esc(proto)}</span><span class="layer-values">${esc(values)}</span></summary><p>${esc(text)}</p></details>`).join('')}<p class="learn-note">Layers 5 and 6 of the OSI model (session, presentation) have no separate fields here: TLS does their work. Real networks follow the simpler TCP/IP model, the OSI numbers are a teaching map.</p></div>`;
+}

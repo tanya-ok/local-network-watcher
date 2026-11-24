@@ -31,3 +31,10 @@ The application can optionally capture packet headers using the bundled TShark b
 * nothing is written to disk or sent anywhere.
 
 Capture runs for a configurable duration (5 – 30 seconds, default 10 s) and a maximum of 3000 packets. Only one capture may run at a time. Results are cleared when the page is closed or when the **Clear** button is used.
+
+## Map and explanations
+
+- **Map**: apps on the left, destinations on the right. Lines show live connections; after a capture their width follows captured bytes. Names come from reverse DNS and from TLS server names seen in a capture.
+- **Owner lookup**: selecting a destination runs `whois` for that address. This asks the public internet registry about the address.
+- **Explain with local AI**: sends the shown facts to a model in Ollama on this Mac (`127.0.0.1:11434`, default `gemma4:26b`, override with `EXPLAIN_MODEL`). Nothing goes to a cloud model.
+- **Layers**: a selected packet is shown layer by layer (OSI 7, 4, 3, 2, 1) with a short explanation of each.
