@@ -32,12 +32,15 @@ jobs:
       - name: Rust build
         run: cargo build --locked
 
-      - name: JavaScript syntax
+      - name: Rust tests
+        run: cargo test --locked
+
+      - name: Page scripts parse
         run: |
           set -euo pipefail
-          for file in server.js history.js public/app.js public/howitworks.js; do
+          for file in public/*.js; do
             node --check "$file"
           done
 
-      - name: Collector runs and prints JSON
-        run: ./target/debug/netwatch-core | python3 -c "import json, sys; d = json.load(sys.stdin); assert 'connections' in d and 'processes' in d"
+      - name: Collector prints a snapshot
+        run: ./target/debug/local-network-watcher --snapshot | python3 -c "import json, sys; d = json.load(sys.stdin); assert 'connections' in d and 'processes' in d"

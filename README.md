@@ -12,10 +12,10 @@ Local Network Watcher is a local-first macOS network observatory. It shows open 
 
 ## Run
 
-Requires macOS, Rust 1.85 or newer and Node.js 20 or newer. The collector that reads sockets and traffic is written in Rust; the small local web server is Node.js. One command builds the collector and starts the server:
+Requires macOS and Rust 1.85 or newer. It is one Rust binary: it collects, serves the page (built into the binary) and answers its API on `127.0.0.1` only.
 
 ```sh
-npm start
+cargo run --release
 ```
 
 Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to use another local port.

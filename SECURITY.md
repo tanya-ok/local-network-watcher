@@ -10,7 +10,7 @@ Useful in a report: the version or commit, macOS version, what you did, what you
 
 ## Scope
 
-In scope: the local server and its API, the capture flow, the history store, the Rust collector, and the browser page.
+In scope: the Rust server and its API, the capture flow, the history store, the collector, and the browser page.
 
 Out of scope: macOS tools the project calls (`lsof`, `nettop`, `tshark`, `whois`), Ollama and local models, and anything that requires an attacker who already runs code as your user.
 
