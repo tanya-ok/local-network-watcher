@@ -269,7 +269,7 @@ cap.clear.addEventListener('click', async () => {
   cap.detail.innerHTML = '<div class="inspector-empty">Start a capture, then select a packet to see all of its fields.</div>';
   renderCapture();
 });
-cap.filter.addEventListener('input', renderCapture);
+cap.filter.addEventListener('input', () => renderCapture());
 cap.rows.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); });
 cap.rows.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); } });
 loadInterfaces();

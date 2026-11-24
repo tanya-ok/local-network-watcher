@@ -350,3 +350,114 @@ renderMap = function () {
     p.style.setProperty('--dur', `${dur}s`);
   });
 };
+
+KNOWN.splice(KNOWN.length - 1, 0,
+  [/^Codex/, 'App', 'OpenAI Codex, a coding assistant. Talks to OpenAI and Google cloud servers.'],
+  [/^node_repl$/, 'Developer tool', 'A Node.js process started by a developer tool or assistant to run code. Check which app started it if unsure.']);
+
+// 7. Events: open the detail right under the clicked event, and keep it open across refreshes.
+let openEventId = null;
+const eventId = (ev) => `${ev.time.getTime()}|${ev.kind}|${ev.pid}|${ev.remote}`;
+const prevRenderEvents2 = renderEvents;
+renderEvents = function () {
+  prevRenderEvents2();
+  if (!openEventId) return;
+  const i = history.findIndex((ev) => eventId(ev) === openEventId);
+  const btn = i >= 0 && eventList.querySelector(`.ev-row[data-i="${i}"]`);
+  if (btn) { btn.classList.add('ev-open-row'); btn.after(eventCard); }
+};
+eventList.addEventListener('click', (e) => {
+  const btn = e.target.closest('.ev-row');
+  if (!btn) return;
+  const ev = history[Number(btn.dataset.i)];
+  if (!ev) return;
+  const id = eventId(ev);
+  eventList.querySelectorAll('.ev-open-row').forEach((b) => b.classList.remove('ev-open-row'));
+  if (openEventId === id) { openEventId = null; eventCard.remove(); return; }
+  openEventId = id;
+  btn.classList.add('ev-open-row');
+  btn.after(eventCard);
+  eventCard.classList.add('ev-inline');
+  eventCard.scrollIntoView({ block: 'nearest', behavior: motionOn ? 'smooth' : 'auto' });
+});
+
+// 8. Capture, made visual: timeline, protocol mix, hosts, colored rows, inline detail.
+const PROTO_COLORS = { TLS: '#3f6fa8', QUIC: '#6b7fb0', TCP: '#7a8fa6', UDP: '#9aa7b6', DNS: '#5f8a5a', MDNS: '#8fb08a', ICMP: '#b0704f', ARP: '#9a7d3a', HTTP: '#b5473f', Other: '#c4c7c2' };
+function protoFamily(p) {
+  const x = String(p || '').toUpperCase();
+  if (x.startsWith('TLS') || x === 'SSL') return 'TLS';
+  if (x.startsWith('ICMP')) return 'ICMP';
+  return PROTO_COLORS[x] ? x : 'Other';
+}
+const capIntro = document.createElement('p');
+capIntro.className = 'learn-note events-intro';
+capIntro.innerHTML = '<b>What is a capture?</b> For a few seconds TShark copies the <b>headers</b> of every packet that passes your Wi-Fi card: who sends, who receives, which protocol, how big. Encrypted content stays unreadable. Each packet is one small piece of a conversation; a web page is often hundreds of them.';
+document.querySelector('#capture .capture-controls').before(capIntro);
+const capVisual = document.createElement('div');
+capVisual.className = 'cap-visual';
+cap.summary.after(capVisual);
+let openPacket = -1;
+
+const prevRenderCapture = renderCapture;
+renderCapture = function () {
+  prevRenderCapture();
+  if (!capPackets.length) { capVisual.innerHTML = ''; return; }
+  // Timeline: packets per half second, split by who sent them.
+  const last = Math.max(...capPackets.map((p) => Number(p.time) || 0), 0.5);
+  const n = Math.min(60, Math.ceil(last / 0.5));
+  const buckets = Array.from({ length: n }, () => ({ app: 0, system: 0, none: 0 }));
+  for (const p of capPackets) {
+    const b = buckets[Math.min(n - 1, Math.floor((Number(p.time) || 0) / 0.5))];
+    b[p.process ? roleOf(p.process) : 'none'] += 1;
+  }
+  const maxB = Math.max(1, ...buckets.map((b) => b.app + b.system + b.none));
+  const timeline = `<div class="cap-block"><b>Packets over time</b><div class="ev-chart cap-chart">${buckets.map((b, i) => `<div class="ev-col" title="${(i * 0.5).toFixed(1)} s: ${b.app} app, ${b.system} system, ${b.none} not matched"><span style="height:${(b.app / maxB) * 100}%;background:${ROLE.app}"></span><span style="height:${(b.system / maxB) * 100}%;background:${ROLE.system}"></span><span style="height:${(b.none / maxB) * 100}%;background:#d9dbd6"></span>${i % 4 === 0 ? `<small>${(i * 0.5).toFixed(0)} s</small>` : ''}</div>`).join('')}</div><div class="proc-legend"><span><i style="background:${ROLE.app}"></i>apps</span><span><i style="background:${ROLE.system}"></i>Apple system</span><span><i style="background:#d9dbd6"></i>not matched to an app (often local network chatter)</span></div></div>`;
+  // Protocol mix as one stacked bar with direct labels.
+  const fam = new Map();
+  for (const p of capPackets) fam.set(protoFamily(p.protocol), (fam.get(protoFamily(p.protocol)) || 0) + 1);
+  const famRows = [...fam.entries()].sort((a, b) => b[1] - a[1]);
+  const total = capPackets.length;
+  const mix = `<div class="cap-block"><b>Protocols</b><div class="mix-bar">${famRows.map(([k, v]) => `<span style="flex:${v};background:${PROTO_COLORS[k]}" title="${esc(k)}: ${v} packets"></span>`).join('')}</div><div class="proc-legend">${famRows.map(([k, v]) => `<span><i style="background:${PROTO_COLORS[k]}"></i>${esc(k)} ${Math.round((v / total) * 100)}%</span>`).join('')}</div><p class="learn-note">${famRows.slice(0, 3).map(([k]) => `<b>${esc(k)}</b>: ${esc((APP_PROTOCOLS[k] || ({ TCP: 'Reliable delivery: these packets open, acknowledge and close conversations.', UDP: 'Single messages without a connection.', Other: 'Everything else in this capture.' })[k] || ''))}`).join(' ')}</p></div>`;
+  // Remote hosts by bytes.
+  const hosts = new Map();
+  for (const p of capPackets) {
+    const remote = isPrivate(p.dst || '') ? p.src : p.dst;
+    if (!remote || isPrivate(remote)) continue;
+    const name = p.dstName || p.srcName || destLabel(remote);
+    const h = hosts.get(name) || { bytes: 0, apps: new Set() };
+    h.bytes += Number(p.len) || 0;
+    if (p.process) h.apps.add(p.process);
+    hosts.set(name, h);
+  }
+  const hostRows = [...hosts.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 6);
+  const maxH = Math.max(1, ...hostRows.map(([, h]) => h.bytes));
+  const hostsHtml = `<div class="cap-block"><b>Where the bytes went</b>${hostRows.map(([name, h]) => { const app = [...h.apps][0]; const col = app ? roleColor(app) : ROLE.system; return `<div class="host-row"><span class="host-name">${esc(name)}<small>${esc([...h.apps].join(', ') || 'no app matched')}</small></span><span class="host-bar"><span style="width:${(h.bytes / maxH) * 100}%;background:${col}"></span></span><span class="proc-num">${formatBytes(h.bytes)}</span></div>`; }).join('')}</div>`;
+  capVisual.innerHTML = timeline + mix + hostsHtml;
+  // Colored dots and protocol chips in the table.
+  cap.rows.querySelectorAll('tr[data-i]').forEach((tr) => {
+    const p = capPackets[Number(tr.dataset.i)];
+    if (!p) return;
+    const procCell = tr.children[2];
+    const dot = p.process ? roleColor(p.process) : '#d9dbd6';
+    procCell.innerHTML = `<span class="ev-dot cap-dot" style="background:${dot}"></span>${esc(p.process || 'not matched')}`;
+    const protoCell = tr.children[5];
+    protoCell.innerHTML = `<span class="proto-chip" style="background:${PROTO_COLORS[protoFamily(p.protocol)]}">${esc(p.protocol)}</span>`;
+  });
+  if (openPacket >= 0) attachPacketDetail(openPacket);
+};
+function attachPacketDetail(i) {
+  const tr = cap.rows.querySelector(`tr[data-i="${i}"]`);
+  if (!tr) return;
+  let holder = cap.rows.querySelector('tr.detail-row');
+  if (!holder) { holder = document.createElement('tr'); holder.className = 'detail-row'; holder.innerHTML = '<td colspan="8"></td>'; }
+  tr.after(holder);
+  holder.firstElementChild.append(cap.detail);
+}
+cap.rows.addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-i]');
+  if (!tr) return;
+  const i = Number(tr.dataset.i);
+  if (openPacket === i) { openPacket = -1; cap.rows.querySelector('tr.detail-row')?.remove(); document.querySelector('#cap-table-wrap').after(cap.detail); return; }
+  openPacket = i;
+  attachPacketDetail(i);
+}, true);
