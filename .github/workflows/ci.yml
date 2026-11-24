@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # The collector calls macOS lsof and nettop, so it is built and linted on macOS.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust lint
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Rust build
+        run: cargo build --locked
+
+      - name: JavaScript syntax
+        run: |
+          set -euo pipefail
+          for file in server.js history.js public/app.js public/howitworks.js; do
+            node --check "$file"
+          done
+
+      - name: Collector runs and prints JSON
+        run: ./target/debug/netwatch-core | python3 -c "import json, sys; d = json.load(sys.stdin); assert 'connections' in d and 'processes' in d"
