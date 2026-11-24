@@ -22,3 +22,12 @@ Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to u
 - `lsof` may not expose details for every protected macOS process. The app does not ask for administrator access.
 
 No data is sent to a remote service.
+## Capture
+
+The application can optionally capture packet headers using the bundled TShark binary (`/Applications/Wireshark.app/Contents/MacOS/tshark`). Capture is **off by default** and can be started from the **Capture** tab in the UI. A confirmation dialog explains that:
+
+* only packet **headers** are read,
+* data lives **only in page memory**,
+* nothing is written to disk or sent anywhere.
+
+Capture runs for a configurable duration (5 – 30 seconds, default 10 s) and a maximum of 3000 packets. Only one capture may run at a time. Results are cleared when the page is closed or when the **Clear** button is used.

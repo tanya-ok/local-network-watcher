@@ -16,6 +16,7 @@
         <a class="nav-item active" href="#activity" aria-current="page"><span class="nav-icon">◌</span>Activity</a>
         <a class="nav-item" href="#processes"><span class="nav-icon">⌘</span>Processes</a>
         <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
+        <a class="nav-item" href="#capture"><span class="nav-icon">◎</span>Capture</a>
         <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
       </nav>
       <div class="rail-note">ON THIS MAC<br><span>Private by design</span></div>
@@ -31,8 +32,30 @@
       </section>
       <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><p class="metrics-note">Byte and packet totals are process-level counts since launch. The live rate is calculated from consecutive system snapshots; it is not assigned to one specific connection.</p></section>
       <section id="events" class="view" aria-labelledby="events-heading"><div class="section-bar"><div><h2 id="events-heading">Recent events</h2><p>Connection changes observed while this page is open.</p></div><button class="text-button" id="clear-events" type="button">Clear history</button></div><div id="event-list" class="event-list"></div></section>
-      <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span>Current page only · nothing saved</span></div><div><strong>Packet inspection</strong><span>Capture engine is a later milestone</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture needs an explicitly started local capture engine. Blocking and isolation need a separate macOS Network Extension.</p></section>
-      <footer class="page-foot"><span>Local Watch</span><span id="source-note">Runs on this Mac · no packet capture</span></footer>
+      <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span>Current page only · nothing saved</span></div><div><strong>Packet inspection</strong><span>Manual TShark capture, headers only, memory only</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture runs only when you start it on the Capture tab, for 5 to 30 seconds. Blocking and isolation need a separate macOS Network Extension.</p></section>
+      <section id="capture" class="view" aria-labelledby="capture-heading">
+        <div class="section-bar"><div><h2 id="capture-heading">Packet capture</h2><p>Read packet headers for a few seconds with TShark. Off until you start it.</p></div></div>
+        <div class="capture-controls">
+          <label class="filter-label" for="cap-iface">Interface <select id="cap-iface"><option value="">Loading…</option></select></label>
+          <label class="filter-label" for="cap-dur">Duration <select id="cap-dur"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="30">30 s</option></select></label>
+          <button id="cap-start" class="cap-button" type="button">Start capture</button>
+          <button id="cap-clear" class="text-button" type="button">Clear</button>
+          <span id="cap-status" class="cap-status" aria-live="polite">No capture yet</span>
+        </div>
+        <div id="cap-summary" class="cap-summary" hidden></div>
+        <div class="capture-filter" id="cap-filter-wrap" hidden><label class="filter-label" for="cap-filter">Filter <input id="cap-filter" type="search" placeholder="protocol, host or process"></label></div>
+        <div class="cap-table-wrap" id="cap-table-wrap" hidden><table class="process-table cap-table"><thead><tr><th>No.</th><th>Time</th><th>Process</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Length</th><th>Info</th></tr></thead><tbody id="cap-rows"></tbody></table></div>
+        <div id="cap-detail" class="flow-inspector"><div class="inspector-empty">Start a capture, then select a packet to see all of its fields.</div></div>
+        <p class="metrics-note">Headers only, kept in this app's memory until you clear them or start a new capture. Nothing is written to disk or sent anywhere. Encrypted traffic stays encrypted; host names come from DNS questions and TLS server names seen in the same capture.</p>
+        <dialog id="cap-dialog" class="cap-dialog" aria-labelledby="cap-dialog-title">
+          <form method="dialog">
+            <h3 id="cap-dialog-title">Start packet capture?</h3>
+            <p id="cap-dialog-text"></p>
+            <div class="cap-dialog-actions"><button value="cancel" class="text-button" type="submit">Cancel</button><button value="ok" class="cap-button" type="submit" id="cap-confirm">Start</button></div>
+          </form>
+        </dialog>
+      </section>
+      <footer class="page-foot"><span>Local Watch</span><span id="source-note">Runs on this Mac · capture only when you start it</span></footer>
     </main>
   </div>
 </body>

@@ -148,3 +148,129 @@ list.addEventListener('click', (event) => {
 renderEvents();
 refresh();
 window.setInterval(refresh, 3000);
+// Packet capture
+const cap = {
+  iface: document.querySelector('#cap-iface'), dur: document.querySelector('#cap-dur'), start: document.querySelector('#cap-start'),
+  clear: document.querySelector('#cap-clear'), status: document.querySelector('#cap-status'), summary: document.querySelector('#cap-summary'),
+  filterWrap: document.querySelector('#cap-filter-wrap'), filter: document.querySelector('#cap-filter'), tableWrap: document.querySelector('#cap-table-wrap'),
+  rows: document.querySelector('#cap-rows'), detail: document.querySelector('#cap-detail'), dialog: document.querySelector('#cap-dialog'), dialogText: document.querySelector('#cap-dialog-text'),
+};
+let capPackets = [];
+let capPoll = null;
+
+function portOf(endpoint) {
+  const i = String(endpoint || '').lastIndexOf(':');
+  return i < 0 ? '' : endpoint.slice(i + 1);
+}
+function localPortMap() {
+  const map = new Map();
+  for (const row of activeRows) { const p = portOf(row.local); if (p) map.set(p, row.process); }
+  return map;
+}
+function enrich(packets) {
+  const names = new Map();
+  for (const p of packets) {
+    const name = p.tlsSNI || p.httpHost;
+    if (name && p.ipDst) names.set(p.ipDst, name);
+    if (name && p.ipv6Dst) names.set(p.ipv6Dst, name);
+  }
+  const ports = localPortMap();
+  return packets.map((p) => {
+    const src = p.ipSrc || p.ipv6Src;
+    const dst = p.ipDst || p.ipv6Dst;
+    const sport = p.tcpSrc || p.udpSrc;
+    const dport = p.tcpDst || p.udpDst;
+    let process = '';
+    if (ports.has(sport)) process = ports.get(sport);
+    else if (ports.has(dport)) process = ports.get(dport);
+    return { ...p, src, dst, sport, dport, process, srcName: names.get(src) || '', dstName: names.get(dst) || '' };
+  });
+}
+function topCounts(items, n = 4) {
+  const counts = new Map();
+  for (const item of items) if (item) counts.set(item, (counts.get(item) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+function renderCapture() {
+  const has = capPackets.length > 0;
+  cap.summary.hidden = cap.filterWrap.hidden = cap.tableWrap.hidden = !has;
+  if (!has) { cap.rows.innerHTML = ''; return; }
+  const bytes = capPackets.reduce((sum, p) => sum + (Number(p.len) || 0), 0);
+  const protocols = topCounts(capPackets.map((p) => p.protocol));
+  const hosts = topCounts(capPackets.flatMap((p) => [p.dstName || p.dst, p.srcName || p.src]).filter((h) => h && !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|fe80:|127\.)/.test(h)));
+  const list = (pairs) => pairs.length ? pairs.map(([k, v]) => `<li><span>${esc(k)}</span><b>${v}</b></li>`).join('') : '<li><span>None seen</span></li>';
+  cap.summary.innerHTML = `<div class="cap-card"><span>Packets</span><strong>${capPackets.length.toLocaleString()}</strong></div><div class="cap-card"><span>Bytes</span><strong>${formatBytes(bytes)}</strong></div><div class="cap-card"><span>Top protocols</span><ul>${list(protocols)}</ul></div><div class="cap-card"><span>Top remote hosts</span><ul>${list(hosts)}</ul></div>`;
+  const q = cap.filter.value.trim().toLowerCase();
+  const shown = capPackets.map((p, i) => [p, i]).filter(([p]) => !q || [p.protocol, p.src, p.dst, p.srcName, p.dstName, p.process, p.dnsQry, p.info].join(' ').toLowerCase().includes(q));
+  cap.rows.innerHTML = shown.slice(0, 1500).map(([p, i]) => `<tr data-i="${i}" tabindex="0"><td>${esc(p.frame)}</td><td>${esc(Number(p.time).toFixed(3))}</td><td>${esc(p.process || '-')}</td><td>${esc(p.srcName || p.src || '-')}</td><td>${esc(p.dstName || p.dst || '-')}</td><td>${esc(p.protocol)}</td><td>${esc(p.len)}</td><td class="cap-info">${esc(p.info)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty-cell">No packets match this filter.</td></tr>';
+}
+function showPacket(i) {
+  const p = capPackets[i];
+  if (!p) return;
+  cap.rows.querySelectorAll('tr').forEach((tr) => tr.classList.toggle('selected', tr.dataset.i === String(i)));
+  const rows = [['Frame', p.frame], ['Time', `${p.time} s`], ['Length', `${p.len} bytes`], ['Process', p.process || 'Not matched to an open connection'], ['Source', `${p.src || '-'}${p.sport ? ':' + p.sport : ''}${p.srcName ? ' (' + p.srcName + ')' : ''}`], ['Destination', `${p.dst || '-'}${p.dport ? ':' + p.dport : ''}${p.dstName ? ' (' + p.dstName + ')' : ''}`], ['Protocol', p.protocol], ['DNS question', p.dnsQry], ['TLS server name', p.tlsSNI], ['HTTP host', p.httpHost], ['Info', p.info]];
+  cap.detail.innerHTML = `<div class="inspector-grid">${rows.filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>`;
+}
+async function loadInterfaces() {
+  try {
+    const res = await fetch('/api/capture/interfaces', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    cap.iface.innerHTML = data.map((i) => `<option value="${esc(i.name)}">${esc(i.description ? `${i.description} (${i.name})` : i.name)}</option>`).join('');
+    const wifi = data.find((i) => /wi-?fi/i.test(i.description)) || data.find((i) => i.name === 'en0');
+    if (wifi) cap.iface.value = wifi.name;
+  } catch (e) {
+    cap.iface.innerHTML = '<option value="">Unavailable</option>';
+    cap.start.disabled = true;
+    cap.status.textContent = e.message || 'TShark is not available';
+  }
+}
+async function pollCapture() {
+  try {
+    const res = await fetch('/api/capture', { cache: 'no-store' });
+    const data = await res.json();
+    capPackets = enrich(data.packets || []);
+    if (data.state === 'running') {
+      cap.status.textContent = `Capturing on ${data.interface} · ${capPackets.length} packets so far`;
+      renderCapture();
+      return;
+    }
+    clearInterval(capPoll); capPoll = null; cap.start.disabled = false;
+    cap.status.textContent = data.state === 'error' ? `Capture stopped: ${data.error}` : data.state === 'done' ? `Captured ${capPackets.length} packets in ${data.seconds} s on ${data.interface}` : 'No capture yet';
+    renderCapture();
+  } catch (e) {
+    clearInterval(capPoll); capPoll = null; cap.start.disabled = false;
+    cap.status.textContent = 'Lost contact with the local app';
+  }
+}
+cap.start.addEventListener('click', () => {
+  if (!cap.iface.value) return;
+  cap.dialogText.textContent = `This reads packet headers on ${cap.iface.selectedOptions[0].textContent} for ${cap.dur.value} seconds. They stay only in this app's memory, nothing is saved to disk and nothing is sent anywhere.`;
+  cap.dialog.showModal();
+});
+cap.dialog.addEventListener('close', async () => {
+  if (cap.dialog.returnValue !== 'ok') return;
+  cap.start.disabled = true;
+  cap.status.textContent = 'Starting…';
+  const res = await fetch('/api/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ interface: cap.iface.value, seconds: Number(cap.dur.value), confirm: true }) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    cap.status.textContent = data.error || 'Capture could not start';
+    cap.start.disabled = false;
+    return;
+  }
+  capPoll = setInterval(pollCapture, 1000);
+});
+cap.clear.addEventListener('click', async () => {
+  await fetch('/api/capture', { method: 'DELETE' });
+  clearInterval(capPoll); capPoll = null;
+  capPackets = []; cap.start.disabled = false; cap.filter.value = '';
+  cap.status.textContent = 'Cleared';
+  cap.detail.innerHTML = '<div class="inspector-empty">Start a capture, then select a packet to see all of its fields.</div>';
+  renderCapture();
+});
+cap.filter.addEventListener('input', renderCapture);
+cap.rows.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); });
+cap.rows.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); } });
+loadInterfaces();
+pollCapture();
