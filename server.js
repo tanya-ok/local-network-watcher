@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reverse } from 'node:dns/promises';
@@ -122,8 +123,15 @@ async function processFacts(pid) {
   return facts;
 }
 
+// `npm start` builds the release collector first; a debug build is used when that is all there is.
+const COLLECTOR = (() => {
+  const base = join(fileURLToPath(new URL('.', import.meta.url)), 'target');
+  const release = join(base, 'release', 'netwatch-core');
+  return existsSync(release) ? release : join(base, 'debug', 'netwatch-core');
+})();
+
 async function activeConnections() {
-  const binary = join(fileURLToPath(new URL('.', import.meta.url)), 'target', 'debug', 'netwatch-core');
+  const binary = COLLECTOR;
   try {
     const { stdout } = await exec(binary, [], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
     return JSON.parse(stdout);
