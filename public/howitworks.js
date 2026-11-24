@@ -461,3 +461,109 @@ cap.rows.addEventListener('click', (e) => {
   openPacket = i;
   attachPacketDetail(i);
 }, true);
+
+// 9. Investigate a process: who started it, from where, signed by whom, which sockets.
+const TCP_STATES = {
+  ESTABLISHED: 'Open and in use: both sides can send data.',
+  LISTEN: 'Waiting for others to connect: a small server on this Mac.',
+  SYN_SENT: 'This Mac asked to connect and waits for an answer.',
+  CLOSE_WAIT: 'The server already closed its side; the app has not closed its own yet. Often a leftover from a finished download. Harmless, but a long-lived one means the app keeps an idle socket.',
+  TIME_WAIT: 'Closed a moment ago; macOS keeps the port reserved for a short time.',
+  FIN_WAIT_1: 'This Mac started closing the connection.',
+  FIN_WAIT_2: 'This Mac closed its side and waits for the other side.',
+  LAST_ACK: 'Closing: waiting for the final confirmation.',
+  CLOSED: 'Fully closed.',
+};
+function chainHtml(f) {
+  const chain = [...f.parents].reverse().map((p) => ({ name: p.command.split(' ')[0].split('/').pop() || p.command, pid: p.pid, cmd: p.command }));
+  chain.push({ name: f.command.split(' ')[0].split('/').pop(), pid: f.pid, cmd: f.command, self: true });
+  return `<div class="chain">${chain.map((c, i) => `${i ? '<span class="chain-arrow">→</span>' : ''}<span class="chain-node${c.self ? ' self' : ''}" title="${esc(c.cmd)}">${esc(c.name)}<small>PID ${esc(c.pid)}</small></span>`).join('')}</div>`;
+}
+async function investigate(container, pid) {
+  const box = document.createElement('div');
+  box.className = 'investigate';
+  box.innerHTML = '<b>Investigate this process</b><p class="learn-note">Reading facts from macOS…</p>';
+  container.append(box);
+  try {
+    const res = await fetch(`/api/process?pid=${encodeURIComponent(pid)}`, { cache: 'no-store' });
+    const f = await res.json();
+    if (!res.ok) throw new Error(f.error || 'Process not found');
+    const sockets = f.sockets.map((s) => {
+      const state = (s.match(/\((\w+)\)$/) || [])[1] || '';
+      const listen = state === 'LISTEN';
+      return `<li><span class="state-chip ${listen ? 'listen' : ''}" title="${esc(TCP_STATES[state] || '')}">${esc(state || 'UDP')}</span><code>${esc(s.replace(/\s*\(\w+\)$/, ''))}</code></li>`;
+    }).join('');
+    const states = [...new Set(f.sockets.map((s) => (s.match(/\((\w+)\)$/) || [])[1]).filter(Boolean))];
+    box.innerHTML = `<b>Investigate this process</b>
+      <div class="inv-grid"><div><span>Started</span><strong>${esc(f.started)}</strong></div><div><span>User</span><strong>${esc(f.user)}</strong></div><div><span>Working folder</span><strong>${esc(f.cwd || 'unknown')}</strong></div><div><span>Signed by</span><strong>${esc(f.signature || 'unknown')}</strong></div></div>
+      <div class="inv-block"><span class="inv-label">Started by</span>${chainHtml(f)}<p class="learn-note">Every process has a parent that launched it. launchd is the root of macOS. A chain through a terminal, pm2 or an IDE means you or a tool you run started it.</p></div>
+      <div class="inv-block"><span class="inv-label">Full command</span><code class="inv-cmd">${esc(f.command)}</code></div>
+      <div class="inv-block"><span class="inv-label">All network sockets of this process</span><ul class="inv-sockets">${sockets || '<li>none right now</li>'}</ul>${states.length ? `<dl class="state-glossary">${states.map((s) => `<dt>${esc(s)}</dt><dd>${esc(TCP_STATES[s] || '')}</dd>`).join('')}</dl>` : ''}</div>
+      <div class="inv-block"><span class="inv-label">Look deeper yourself</span><ul class="inv-tips"><li>Activity Monitor: select the process, then Info shows open files and ports.</li><li>Terminal, read-only: <code>lsof -nP -p ${esc(f.pid)}</code> lists every file and socket it holds.</li><li>Terminal: <code>ps -o ppid,command -p ${esc(f.pid)}</code> shows how it was started.</li><li>Unsigned or unexpected parent, or a folder you do not recognise: ask the local AI or check the project in that folder.</li></ul></div>`;
+  } catch (e) {
+    box.innerHTML = `<b>Investigate this process</b><p class="learn-note">${esc(e.message)}. It may have exited.</p>`;
+  }
+}
+const prevSelectOnMap2 = selectOnMap;
+selectOnMap = function (sel) {
+  prevSelectOnMap2(sel);
+  const row = sel.app && activeRows.find((r) => r.process === sel.app && (!sel.ip || hostOf(r.remote) === sel.ip));
+  if (row) investigate(mapDetail, row.pid);
+};
+processView.addEventListener('click', (e) => {
+  const btn = e.target.closest('.proc-row');
+  const r = btn && processRows[Number(btn.dataset.i)];
+  if (r) investigate(processCard, r.pid);
+});
+eventList.addEventListener('click', (e) => {
+  const btn = e.target.closest('.ev-row');
+  const ev = btn && history[Number(btn.dataset.i)];
+  if (ev && ev.pid && openEventId) investigate(eventCard, ev.pid);
+});
+
+// 10. Settings, as a picture of what runs where.
+async function renderSettings() {
+  const section = document.querySelector('#settings');
+  let s = {};
+  try { s = await (await fetch('/api/settings', { cache: 'no-store' })).json(); } catch { /* offline */ }
+  const learnStart = (s.learningUntil || Date.now()) - 24 * 3600 * 1000;
+  const progress = Math.max(0, Math.min(1, (Date.now() - learnStart) / (24 * 3600 * 1000)));
+  const local = '#3f6fa8', net = '#8a8f8a';
+  const nodes = [
+    ['lsof', 'which app owns which socket', local, 'macOS tool, read-only'],
+    ['nettop', 'bytes and packets per app', local, 'macOS tool, read-only'],
+    ['Rust core', 'joins both every 3 s', local, 'this project'],
+    ['Server', `127.0.0.1:${s.port || 4317}`, local, 'answers only this Mac'],
+    ['TShark', 'packet headers, on your click', local, 'Wireshark project'],
+    ['Ollama', s.explainModel || 'local model', local, 'explanations, on your click'],
+    ['DNS', 'names for addresses', net, 'asks your DNS resolver'],
+    ['whois', 'owner of an address', net, 'asks the public registry'],
+  ];
+  const W = 900, colW = W / 4;
+  const box = (n, i) => {
+    const x = (i % 4) * colW + 10, y = Math.floor(i / 4) * 92 + 10;
+    return `<g><rect x="${x}" y="${y}" width="${colW - 20}" height="72" rx="8" fill="${n[2]}" fill-opacity=".1" stroke="${n[2]}" stroke-width="1.5" ${n[2] === net ? 'stroke-dasharray="5 4"' : ''}/><text x="${x + 12}" y="${y + 22}" class="hiw-label" font-weight="600">${esc(n[0])}</text><text x="${x + 12}" y="${y + 40}" class="hiw-value">${esc(n[1])}</text><text x="${x + 12}" y="${y + 58}" class="hiw-tagtext">${esc(n[3])}</text></g>`;
+  };
+  const flowSvg = `<svg viewBox="0 0 ${W} 194" role="img" aria-label="What runs where">${nodes.map(box).join('')}</svg>`;
+  const bar = section.querySelector('.section-bar');
+  section.innerHTML = '';
+  section.append(bar);
+  section.insertAdjacentHTML('beforeend', `
+    <div class="set-grid">
+      <article class="set-card wide"><h3>What runs where</h3><div class="hiw-canvas">${flowSvg}</div><div class="proc-legend"><span><i style="background:${local}"></i>stays on this Mac</span><span><i style="background:${net}"></i>asks the network (only names and owners of addresses, never your data)</span></div></article>
+      <article class="set-card"><h3>Learning what is normal</h3><div class="learn-bar"><span style="width:${(progress * 100).toFixed(0)}%"></span></div><p>${progress < 1 ? `Learning until ${esc(new Date(s.learningUntil).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))}. Markers start after that.` : 'Learning done. New apps, destinations, ports, night activity and traffic bursts are marked in red with a reason.'}</p><p class="set-num"><b>${esc(s.apps ?? '-')}</b> apps learned · sampled every ${esc(s.sampleSeconds || 15)} s</p></article>
+      <article class="set-card"><h3>Stored on this Mac</h3><p id="history-info">${esc(s.file || '')}</p><p class="learn-note">Only metadata: app names, destination groups, ports and times. Never packet contents. Folder readable by you only.</p><button id="forget-history-2" class="cap-button" type="button">Delete the learned history</button></article>
+      <article class="set-card"><h3>Display</h3><p>Animated traffic follows bytes per second.</p><button class="cap-button set-motion" type="button">${motionOn ? 'Turn motion off' : 'Turn motion on'}</button><p class="learn-note">Refreshes every 3 seconds.</p></article>
+      <article class="set-card"><h3>Promises</h3><ul class="promise"><li>Listens on 127.0.0.1 only; other devices cannot open it.</li><li>Packet capture only after your click and confirmation, 5 to 30 seconds, memory only.</li><li>AI explanations from a model on this Mac only.</li><li>No admin rights. No firewall changes. Blocking is not built.</li></ul></article>
+    </div>`);
+  section.querySelector('.set-motion').addEventListener('click', () => { motionToggle.click(); renderSettings(); });
+  const forget = section.querySelector('#forget-history-2');
+  forget.addEventListener('click', async () => {
+    if (forget.dataset.armed !== 'yes') { forget.dataset.armed = 'yes'; forget.textContent = 'Press again to delete. Learning starts over.'; return; }
+    await fetch('/api/history', { method: 'DELETE' });
+    loadMarkers();
+    renderSettings();
+  });
+}
+document.querySelector('a[href="#settings"]').addEventListener('click', () => renderSettings());
+renderSettings();

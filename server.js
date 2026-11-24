@@ -92,6 +92,32 @@ async function ownerOf(ip) {
   return owner;
 }
 
+// Read-only facts about one process: command line, parents, folder, sockets, code signature.
+async function processFacts(pid) {
+  const run = async (cmd, args, both = false) => { try { const r = await exec(cmd, args, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }); return both ? `${r.stdout}${r.stderr}` : r.stdout; } catch (e) { return `${e.stdout || ''}${e.stderr || ''}`; } };
+  const ps = (await run('/bin/ps', ['-ww', '-o', 'pid=,ppid=,user=,lstart=,command=', '-p', String(pid)])).trim();
+  if (!ps) return null;
+  const m = ps.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.*)$/);
+  const facts = { pid, ppid: m ? Number(m[2]) : 0, user: m?.[3] || '', started: m?.[4] || '', command: (m?.[5] || ps).slice(0, 600), parents: [], cwd: '', sockets: [], signature: '' };
+  let parent = facts.ppid;
+  for (let i = 0; i < 6 && parent > 0; i++) {
+    const line = (await run('/bin/ps', ['-ww', '-o', 'ppid=,command=', '-p', String(parent)])).trim();
+    if (!line) break;
+    const [, pp, cmd] = line.match(/^(\d+)\s+(.*)$/) || [];
+    facts.parents.push({ pid: parent, command: (cmd || '').slice(0, 200) });
+    parent = Number(pp);
+  }
+  facts.cwd = ((await run('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'])).split('\n').find((l) => l.startsWith('n')) || '').slice(1);
+  facts.sockets = (await run('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-i'])).split('\n').slice(1).filter(Boolean).map((l) => l.split(/\s+/).slice(7).join(' ')).slice(0, 30);
+  const exe = facts.command.split(' ')[0];
+  if (exe.startsWith('/')) {
+    const sig = await run('/usr/bin/codesign', ['-dv', '--verbose=2', exe], true);
+    const authority = [...sig.matchAll(/^Authority=(.+)$/gm)].map((x) => x[1]);
+    facts.signature = authority.length ? authority.join(' → ') : /not signed/i.test(sig) ? 'not signed' : /Signature=adhoc/.test(sig) ? 'ad hoc only (no developer identity; common for Homebrew and self-built tools)' : 'unknown';
+  }
+  return facts;
+}
+
 async function activeConnections() {
   const binary = join(fileURLToPath(new URL('.', import.meta.url)), 'target', 'debug', 'netwatch-core');
   try {
@@ -121,6 +147,16 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
     }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/settings') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), explainModel: EXPLAIN_MODEL, sampleSeconds: 15, port, tshark: TSHARK }));
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/process') {
+    const pid = Number(new URL(req.url, 'http://localhost').searchParams.get('pid'));
+    const facts = Number.isInteger(pid) && pid > 0 ? await processFacts(pid) : null;
+    res.writeHead(facts ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(facts || { error: 'Process not found.' }));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/markers') {
