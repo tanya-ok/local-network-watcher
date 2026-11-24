@@ -197,7 +197,7 @@ fn parse_nettop(text: &str, names: &HashMap<u32, (String, String)>) -> Vec<Proce
             sent_packets: value("packets_out"),
         });
     }
-    rows.sort_by(|a, b| (b.received_bytes + b.sent_bytes).cmp(&(a.received_bytes + a.sent_bytes)));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.received_bytes + row.sent_bytes));
     rows.dedup_by_key(|row| row.pid);
     rows
 }

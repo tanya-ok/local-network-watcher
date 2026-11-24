@@ -1,10 +1,12 @@
 # Local Network Watcher
 
-![Where things go — an illustrative view of local network activity](docs/images/readme-hero.svg)
+![Where things go: an illustrative view of local network activity](docs/images/readme-hero.svg)
 
 *Illustrative UI artwork with synthetic labels, not a live snapshot from a specific Mac.*
 
 *A live view of connections open on this Mac.*
+
+Site: <https://tanya-ok.github.io/local-network-watcher/> · Security: [SECURITY.md](SECURITY.md)
 
 Local Network Watcher is a local-first macOS network observatory. It shows open process-to-endpoint connections, process-level traffic counters, connection changes, a live route diagram, and selected packet fields from an optional TShark capture. It is designed to help people understand and investigate network activity; a new connection or unusual pattern is a prompt to inspect, not proof of malicious behavior.
 
