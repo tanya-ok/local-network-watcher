@@ -462,9 +462,9 @@ mapSvg.addEventListener('click', (e) => {
   if (node) selectOnMap(node.dataset.app ? { app: node.dataset.app } : { ip: node.dataset.ip });
 });
 mapSvg.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-mapScope.addEventListener('change', renderMap);
-document.querySelector('a[href="#map"]').addEventListener('click', () => setTimeout(renderMap, 0));
-setInterval(renderMap, 3000);
+mapScope.addEventListener('change', () => renderMap());
+document.querySelector('a[href="#map"]').addEventListener('click', () => setTimeout(() => renderMap(), 0));
+setInterval(() => renderMap(), 3000);
 
 // Explain a captured packet too
 const baseShowPacket = showPacket;
@@ -500,3 +500,64 @@ function layersHtml(p) {
   ];
   return `<div class="layers"><b>This packet, layer by layer (OSI model)</b>${layers.map(([name, proto, values, text]) => `<details class="layer"><summary><span class="layer-name">${esc(name)}</span><span class="layer-proto">${esc(proto)}</span><span class="layer-values">${esc(values)}</span></summary><p>${esc(text)}</p></details>`).join('')}<p class="learn-note">Layers 5 and 6 of the OSI model (session, presentation) have no separate fields here: TLS does their work. Real networks follow the simpler TCP/IP model, the OSI numbers are a teaching map.</p></div>`;
 }
+
+// Attention markers from the local baseline
+const attention = document.querySelector('#attention');
+let markers = [];
+let learningUntil = 0;
+const KIND_LABEL = { 'new-app': 'New app online', 'new-destination': 'New destination', 'unusual-port': 'Unusual port', night: 'Night activity', volume: 'Unusual volume' };
+async function loadMarkers() {
+  try {
+    const res = await fetch('/api/markers', { cache: 'no-store' });
+    const data = await res.json();
+    markers = data.markers || [];
+    learningUntil = data.learningUntil || 0;
+    const info = document.querySelector('#history-info');
+    if (info) info.textContent = `${data.apps} apps learned · stored only on this Mac in ${data.file}`;
+    renderAttention();
+    renderMap();
+  } catch { /* markers are optional */ }
+}
+function renderAttention() {
+  const learning = Date.now() < learningUntil;
+  const head = learning ? `<p class="attention-learning">Learning what is normal for this Mac until ${new Date(learningUntil).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}. Markers start after that.</p>` : '';
+  if (!markers.length) {
+    attention.innerHTML = head || '<p class="attention-quiet">Nothing needs a look right now.</p>';
+    return;
+  }
+  attention.innerHTML = `${head}<div class="attention-list">${markers.slice(0, 8).map((m, i) => `<article class="attention-item" data-i="${i}"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)}</span><p>${esc(m.text)}</p><small>${esc(new Date(m.at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small><div class="attention-actions"><button class="text-button attention-show" type="button">Show on map</button><button class="text-button attention-ok" type="button">Looks normal</button></div></article>`).join('')}</div>`;
+}
+attention.addEventListener('click', async (e) => {
+  const card = e.target.closest('.attention-item');
+  if (!card) return;
+  const m = markers[Number(card.dataset.i)];
+  if (!m) return;
+  if (e.target.closest('.attention-ok')) {
+    await fetch('/api/markers/accept', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: m.key }) });
+    loadMarkers();
+    return;
+  }
+  if (e.target.closest('.attention-show')) {
+    const inMap = m.ip && mapModel.dests.includes(m.ip);
+    selectOnMap(inMap ? { app: m.app, ip: m.ip } : { app: m.app });
+    const note = `<p class="attention-why"><b>${esc(KIND_LABEL[m.kind] || m.kind)}:</b> ${esc(m.text)}${inMap ? '' : ' The connection is not open right now.'}</p>`;
+    mapDetail.insertAdjacentHTML('afterbegin', note);
+  }
+});
+const baseRenderMap = renderMap;
+renderMap = function () {
+  baseRenderMap();
+  const flaggedApps = new Set(markers.map((m) => m.app));
+  const flaggedIps = new Set(markers.map((m) => m.ip).filter(Boolean));
+  mapSvg.querySelectorAll('.map-node').forEach((g) => g.classList.toggle('flag', flaggedApps.has(g.dataset.app) || flaggedIps.has(g.dataset.ip)));
+  mapSvg.querySelectorAll('.map-line').forEach((p) => { const [a, ip] = p.dataset.key.split('|'); p.classList.toggle('flag', markers.some((m) => m.app === a && m.ip === ip)); });
+};
+document.querySelector('#forget-history').addEventListener('click', async (e) => {
+  const button = e.target;
+  if (button.dataset.armed !== 'yes') { button.dataset.armed = 'yes'; button.textContent = 'Press again to delete. Learning starts over.'; return; }
+  await fetch('/api/history', { method: 'DELETE' });
+  button.dataset.armed = ''; button.textContent = 'Deleted. Learning started over.';
+  loadMarkers();
+});
+loadMarkers();
+setInterval(loadMarkers, 15000);

@@ -5,6 +5,7 @@ import { reverse } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { accept, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 
 const exec = promisify(execFile);
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -119,6 +120,33 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
+    }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/markers') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), markers: currentMarkers() }));
+    return;
+  }
+  if ((req.method === 'POST' && pathname === '/api/markers/accept') || (req.method === 'DELETE' && pathname === '/api/history')) {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) {
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'Only this page can change the history.' }));
+      return;
+    }
+    if (req.method === 'DELETE') {
+      await forgetHistory();
+      res.writeHead(204).end();
+      return;
+    }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    try {
+      const { key } = JSON.parse(body || '{}');
+      if (!accept(key)) throw new Error('Unknown marker.');
+      await saveHistory();
+      res.writeHead(204).end();
+    } catch (e) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message }));
     }
     return;
   }
@@ -245,6 +273,21 @@ const server = createServer(async (req, res) => {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found');
   }
 });
+
+
+// Background sampling builds the local baseline even when the page is closed.
+async function sample() {
+  try {
+    const data = await activeConnections();
+    const ips = [...new Set((data.connections || []).map((r) => String(r.remote).replace(/:\d+$/, '').replace(/^\[|\]$/g, '')))];
+    await Promise.all(ips.slice(0, 80).map((ip) => reverseName(ip)));
+    observe(data, nameCache);
+    await saveHistory();
+  } catch { /* sampling is best effort */ }
+}
+await loadHistory();
+setInterval(sample, 15000);
+sample();
 
 const port = Number(process.env.PORT || 4317);
 server.listen(port, '127.0.0.1', () => console.log(`Local Network Watch is listening at http://127.0.0.1:${port}`));

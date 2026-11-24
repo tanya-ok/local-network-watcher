@@ -38,3 +38,9 @@ Capture runs for a configurable duration (5 – 30 seconds, default 10�
 - **Owner lookup**: selecting a destination runs `whois` for that address. This asks the public internet registry about the address.
 - **Explain with local AI**: sends the shown facts to a model in Ollama on this Mac (`127.0.0.1:11434`, default `gemma4:26b`, override with `EXPLAIN_MODEL`). Nothing goes to a cloud model.
 - **Layers**: a selected packet is shown layer by layer (OSI 7, 4, 3, 2, 1) with a short explanation of each.
+
+## Attention markers
+
+The server samples connections every 15 seconds, also while the page is closed, and learns what is normal for 24 hours. After that it marks, with one plain sentence: an app online for the first time, a new destination for an app, an unusual port, night activity (00:00 to 06:00) from an app that is rarely online then, and a sudden traffic burst. "Looks normal" silences a marker for good.
+
+History holds metadata only (app names, destination groups by reverse-DNS domain or network block, ports, times), never packet contents. It lives in `~/Library/Application Support/LocalWatch/history.json` (folder `0700`, file `0600`). Settings has a button to delete it. `LOCAL_WATCH_DATA` and `LOCAL_WATCH_LEARNING_HOURS` override the folder and the learning period.
