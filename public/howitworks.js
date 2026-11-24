@@ -286,3 +286,67 @@ eventList.addEventListener('click', (e) => {
   const row = { pid: ev.pid, process: ev.process, protocol: ev.protocol || 'TCP', local: ev.local || '', remote: ev.remote, state: open ? 'ESTABLISHED' : 'CLOSED' };
   diagram(eventCard, socketPath(row, `Its name here: ${destLabel(ip)}.`));
 });
+
+// 6. Motion: traffic you can see. Speed follows the app's current traffic.
+let motionOn = true;
+try { motionOn = localStorage.getItem('lw-motion') !== 'off'; } catch { /* storage optional */ }
+document.documentElement.classList.toggle('motion-off', !motionOn);
+const motionToggle = document.createElement('button');
+motionToggle.type = 'button';
+motionToggle.className = 'text-button motion-toggle';
+const setMotionLabel = () => { motionToggle.textContent = motionOn ? 'Motion on' : 'Motion off'; motionToggle.setAttribute('aria-pressed', String(motionOn)); };
+setMotionLabel();
+motionToggle.addEventListener('click', () => {
+  motionOn = !motionOn;
+  try { localStorage.setItem('lw-motion', motionOn ? 'on' : 'off'); } catch { /* storage optional */ }
+  document.documentElement.classList.toggle('motion-off', !motionOn);
+  setMotionLabel();
+});
+document.querySelector('.live-state').after(motionToggle);
+
+// Faster flow for more bytes per second: 0.5 s per dash cycle at about 1 MB/s, 4 s when nearly idle.
+function flowDuration(bytesPerSecond) {
+  if (!bytesPerSecond) return 0;
+  const d = 4 - Math.log10(1 + bytesPerSecond / 1000) * 1.2;
+  return Math.max(0.5, Math.min(4, d));
+}
+function routeSvg(row) {
+  const stats = currentProcessStats.get(row.pid);
+  const out = stats ? stats.sentRate : 0;
+  const inn = stats ? stats.receivedRate : 0;
+  const color = markers.some((m) => m.app === row.process) ? ROLE.flag : roleColor(row.process);
+  const lane = (y, rate, dir) => {
+    const dur = flowDuration(rate);
+    // A delay from the wall clock keeps the flow phase steady when the list re-renders.
+    const delay = dur ? -((performance.now() / 1000) % dur) : 0;
+    return `<line x1="4" y1="${y}" x2="156" y2="${y}" class="flow ${dur ? `flow-${dir}` : 'flow-idle'}" stroke="${color}" style="--dur:${dur || 0}s;animation-delay:${delay.toFixed(3)}s"/>`;
+  };
+  const title = `${row.process}: sending ${formatRate(out)}, receiving ${formatRate(inn)} (whole app)`;
+  return `<svg class="route-svg" viewBox="0 0 160 26" preserveAspectRatio="none" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title>${lane(8, out, 'out')}${lane(18, inn, 'in')}<path d="M152 4 L158 8 L152 12" class="flow-head" stroke="${color}"/><path d="M8 14 L2 18 L8 22" class="flow-head" stroke="${color}"/></svg>`;
+}
+const prevRenderConnections = renderConnections;
+renderConnections = function (rows) {
+  prevRenderConnections(rows);
+  list.querySelectorAll('.connection-row').forEach((el) => {
+    const row = rows[Number(el.dataset.index)];
+    const route = el.querySelector('.route');
+    if (row && route) { route.classList.add('route-live'); route.innerHTML = routeSvg(row); }
+  });
+};
+const routeHelp = document.createElement('p');
+routeHelp.className = 'learn-note route-help';
+routeHelp.innerHTML = '<b>Reading the routes.</b> Upper lane: data your Mac <b>sends</b>, flowing right. Lower lane: data it <b>receives</b>, flowing left. Faster flow means more bytes per second. Still, faint lines are open connections with no traffic right now. macOS counts traffic per app, not per connection, so every line of one app moves at that app\'s speed. Colours: grey for Apple system, blue for apps, red for something that needs a look.';
+document.querySelector('#activity .table-head').before(routeHelp);
+
+// Map lines flow too, at the app's speed.
+const prevRenderMap2 = renderMap;
+renderMap = function () {
+  prevRenderMap2();
+  const rateByApp = new Map();
+  for (const s of currentProcessStats.values()) rateByApp.set(s.process, (rateByApp.get(s.process) || 0) + s.sentRate + s.receivedRate);
+  mapSvg.querySelectorAll('.map-line').forEach((p) => {
+    const dur = flowDuration(rateByApp.get(p.dataset.key.split('|')[0]) || 0);
+    p.classList.toggle('map-flow', dur > 0);
+    p.style.setProperty('--dur', `${dur}s`);
+  });
+};
