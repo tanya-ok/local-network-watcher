@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Documentation for Local Network Watcher, a local-first macOS network observatory.">
+  <title>Local Network Watcher — Field guide</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101512;--panel:#18201b;--line:#34443a;--ink:#f0eee5;--muted:#adb9ab;--green:#a8c9a2;--amber:#e5a36f;--blue:#96c8d7;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--serif:Georgia,"Times New Roman",serif;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% -12%,#29392d 0,transparent 53%),var(--bg);color:var(--ink);font:16px/1.65 var(--sans)}a{color:var(--green)}.wrap{width:min(1100px,calc(100% - 40px));margin:auto}.top{padding:24px 0;border-bottom:1px solid var(--line);font:12px var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}.brand{color:var(--ink);text-decoration:none}.hero{padding:86px 0 58px;max-width:820px}.eyebrow{font:12px var(--mono);color:var(--amber);letter-spacing:.12em;text-transform:uppercase}.hero h1{font:clamp(50px,9vw,96px)/.95 var(--serif);letter-spacing:-.055em;margin:20px 0}.hero p{max-width:650px;font-size:19px;color:var(--muted)}.hero .sub{font:italic 22px var(--serif);color:var(--green)}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.btn{padding:11px 16px;border:1px solid var(--green);border-radius:3px;text-decoration:none;color:var(--ink)}.btn.primary{background:var(--green);color:#162019}.visual{margin:24px 0 74px;border:1px solid var(--line);border-radius:6px;background:#141a16;overflow:hidden}.visual svg{display:block;width:100%;height:auto}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:20px 0 76px}.card{padding:21px;border:1px solid var(--line);background:linear-gradient(145deg,#1b251e,var(--panel));min-height:190px}.card .num{font:12px var(--mono);color:var(--amber)}h2{font:38px var(--serif);letter-spacing:-.03em;margin:0 0 12px}h3{font:24px var(--serif);margin:12px 0 8px}.card p,.section-intro{color:var(--muted);margin:0}.section{padding-bottom:74px}.table{width:100%;border-collapse:collapse;margin-top:20px}.table th,.table td{text-align:left;padding:13px;border-bottom:1px solid var(--line);vertical-align:top}.table th{color:var(--green);font:12px var(--mono);letter-spacing:.06em;text-transform:uppercase}.notice{border-left:3px solid var(--amber);padding:12px 18px;background:#201b16;color:var(--muted);margin:20px 0 0}.notice b{color:var(--ink)}footer{border-top:1px solid var(--line);padding:25px 0 40px;color:var(--muted);font-size:13px}code{font:13px var(--mono);color:var(--blue)}@media(max-width:760px){.grid{grid-template-columns:1fr}.hero{padding-top:58px}.table{font-size:14px}.table th,.table td{padding:9px 6px}}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="wrap"><a class="brand" href="#top">Local Watch / Field guide</a></div></header>
+  <main class="wrap" id="top">
+    <section class="hero">
+      <div class="eyebrow">A local-first macOS network observatory</div>
+      <h1>Where things go</h1>
+      <p class="sub">A live view of connections open on this Mac.</p>
+      <p>Follow a connection from the app that opened it to the remote address. See the evidence the Mac can observe, learn what a socket and packet mean, and inspect selected packet fields with TShark.</p>
+      <div class="actions"><a class="btn primary" href="https://github.com/tanya-ok/local-network-watcher">View the source</a><a class="btn" href="#limits">What it can see</a></div>
+    </section>
+
+    <figure class="visual" aria-label="Illustration of a local app connection traveling through a Mac network stack to a remote service">
+      <svg viewBox="0 0 1100 300" role="img" aria-labelledby="map-title map-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="map-title">One connection, from app to remote service</title><desc id="map-desc">A process asks the operating system for a socket. The operating system sends data through the network interface and router to a remote service.</desc>
+        <rect width="1100" height="300" fill="#141a16"/><path d="M85 150H1015" stroke="#78967a" stroke-width="3" stroke-dasharray="7 11"/><path d="M1015 150l-14-8v16z" fill="#a8c9a2"/>
+        <g font-family="system-ui" text-anchor="middle" fill="#f0eee5">
+          <g transform="translate(110 150)"><circle r="42" fill="#20332a" stroke="#a8c9a2" stroke-width="2"/><text y="6" font-size="25">▣</text><text y="73" font-size="15">App process</text><text y="96" fill="#adb9ab" font-size="12">opens a socket</text></g>
+          <g transform="translate(330 150)"><circle r="42" fill="#242938" stroke="#96c8d7" stroke-width="2"/><text y="6" font-size="25">⌘</text><text y="73" font-size="15">macOS</text><text y="96" fill="#adb9ab" font-size="12">TCP/IP stack</text></g>
+          <g transform="translate(550 150)"><circle r="42" fill="#32281e" stroke="#e5a36f" stroke-width="2"/><text y="7" font-family="monospace" font-size="18">bytes</text><text y="73" font-size="15">Network card</text><text y="96" fill="#adb9ab" font-size="12">Wi-Fi or Ethernet</text></g>
+          <g transform="translate(770 150)"><circle r="42" fill="#20332a" stroke="#a8c9a2" stroke-width="2"/><text y="7" font-size="24">⌂</text><text y="73" font-size="15">Router</text><text y="96" fill="#adb9ab" font-size="12">local next hop</text></g>
+          <g transform="translate(990 150)"><circle r="42" fill="#32281e" stroke="#e5a36f" stroke-width="2"/><text y="7" font-size="24">◎</text><text y="73" font-size="15">Remote service</text><text y="96" fill="#adb9ab" font-size="12">destination</text></g>
+          <text x="550" y="40" fill="#adb9ab" font-family="monospace" font-size="12" letter-spacing="2">A ROUTE DIAGRAM · NOT A PACKET TRACE</text>
+        </g>
+      </svg>
+    </figure>
+
+    <section class="section" id="guide">
+      <h2>Read the map</h2><p class="section-intro">Start with the simple view, then open the evidence when you want detail.</p>
+      <div class="grid">
+        <article class="card"><span class="num">01 / CONNECTIONS</span><h3>Follow the route</h3><p>See local processes with open remote sockets, their endpoints, and connection changes. Select a route to inspect its details.</p></article>
+        <article class="card"><span class="num">02 / PROCESSES</span><h3>Compare activity</h3><p>See per-process byte and packet totals, plus a short-term rate estimated from successive system snapshots. Browse 25 entries per page.</p></article>
+        <article class="card"><span class="num">03 / PACKETS</span><h3>Inspect a sample</h3><p>Start an optional, short TShark capture to view selected decoded fields. Capture is off until you start it.</p></article>
+      </div>
+    </section>
+
+    <section class="section" id="limits">
+      <h2>What the Mac can show</h2><p class="section-intro">The diagram makes observations easier to understand; it does not create visibility the operating system does not provide.</p>
+      <table class="table"><thead><tr><th>View</th><th>Evidence</th><th>Boundary</th></tr></thead><tbody>
+        <tr><td>Connections</td><td>Open socket endpoints and owning process when macOS exposes them.</td><td>Short-lived connections may disappear between snapshots; protected processes may be hidden.</td></tr>
+        <tr><td>Process traffic</td><td>Aggregate byte and packet counters from macOS, with a rate estimated between snapshots.</td><td>Totals are not assigned to individual sockets.</td></tr>
+        <tr><td>Flight Map</td><td>Local process, socket, route lookup and next-hop gateway.</td><td>Internet routers and the far-end socket are outside this Mac's view.</td></tr>
+        <tr><td>TShark capture</td><td>Selected decoded headers and protocol fields during a short capture.</td><td>Not a full protocol-tree interface; TLS application contents are not decrypted.</td></tr>
+      </tbody></table>
+      <p class="notice"><b>Investigation cues are not verdicts.</b> A new destination, unfamiliar process, or unusual port can be worth checking. None alone proves malicious activity.</p>
+    </section>
+
+    <section class="section"><h2>Run locally</h2><p class="section-intro">The monitor is built for macOS. Rust reads system network observations; Node.js serves the local interface.</p><p><code>cargo build</code> &nbsp; then &nbsp; <code>npm start</code></p><p>Open <code>http://127.0.0.1:4317</code>. The server listens on loopback. See the repository README for optional TShark, local Ollama explanations, data retention and platform limitations.</p></section>
+  </main>
+  <footer><div class="wrap">Local Network Watcher · Open source under the MIT License · Created by Tanya Babitskaya</div></footer>
+</body>
+</html>

@@ -2,6 +2,8 @@
   "name": "local-network-watcher",
   "version": "0.1.0",
   "private": true,
+  "author": "Tanya Babitskaya",
+  "license": "MIT",
   "description": "A local, read-only view of active network connections on this Mac.",
   "type": "module",
   "engines": {

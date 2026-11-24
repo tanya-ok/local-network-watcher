@@ -1,6 +1,12 @@
 # Local Network Watcher
 
-A local, read-only monitor for current network connections on macOS. The app polls `lsof` on this device and shows the process, local endpoint, remote endpoint, protocol, and socket state. It does not capture packet contents, count bytes, resolve hostnames, persist logs, or change firewall rules.
+![Where things go — an illustrative view of local network activity](docs/images/readme-hero.svg)
+
+*Illustrative UI artwork with synthetic labels, not a live snapshot from a specific Mac.*
+
+*A live view of connections open on this Mac.*
+
+Local Network Watcher is a local-first macOS network observatory. It shows open process-to-endpoint connections, process-level traffic counters, connection changes, a live route diagram, and selected packet fields from an optional TShark capture. It is designed to help people understand and investigate network activity; a new connection or unusual pattern is a prompt to inspect, not proof of malicious behavior.
 
 ## Run
 
@@ -13,31 +19,43 @@ npm start
 
 Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to use another local port.
 
-## Scope
+## What it observes
 
-- Read-only live connection snapshots, refreshed every three seconds.
-- “First seen” means first observed since this page was opened; it is not a threat verdict.
-- Recent events live in browser memory and disappear when the page closes.
-- Blocking and app isolation are not implemented. Buttons that would make those changes are intentionally absent.
-- `lsof` may not expose details for every protected macOS process. The app does not ask for administrator access.
+- Connection snapshots are refreshed every three seconds from `lsof`; process byte and packet totals come from `nettop` and are not attributed to individual sockets. The optional process inventory is assembled from `ps` and `nettop`; the checkbox can include zero-valued processes visible in that snapshot. This is not guaranteed to equal every row Activity Monitor can show. The connection map remains limited to observed open remote sockets.
+- **Process traffic** lists 25 entries per page. Processes with a non-zero current rate appear first, followed by the highest observed rate. Search and the “include processes with no network counters” option apply to the full snapshot before paging.
+- The server samples every 15 seconds to build a local baseline. It stores process names, destination groups, ports, and timestamps in `~/Library/Application Support/LocalWatch/history.json` with restrictive file permissions. The Settings view can delete this history.
+- Reverse DNS requests use the Mac's configured resolver. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
+- “First seen” and other attention markers describe what this local baseline observed. They are investigation cues, not threat verdicts.
+- macOS may hide details for protected processes. Normal monitoring does not request administrator access.
+- A user can request SIGTERM for a same-account process after a confirmation. This may close unsaved work and does not block network access. Restart and network isolation are not implemented.
+- This version does not enforce firewall rules or identify a connection as malicious.
 
-No data is sent to a remote service.
 ## Capture
 
-The application can optionally capture packet headers using the bundled TShark binary (`/Applications/Wireshark.app/Contents/MacOS/tshark`). Capture is **off by default** and can be started from the **Capture** tab in the UI. A confirmation dialog explains that:
+The application can optionally capture decoded packet fields using TShark from an installed Wireshark app at `/Applications/Wireshark.app/Contents/MacOS/tshark`. The binary is a local dependency, not bundled with this repository. Capture is **off by default** and can be started from the **Capture** tab in the UI. A confirmation dialog explains that:
 
-* only packet **headers** are read,
-* data lives **only in page memory**,
-* nothing is written to disk or sent anywhere.
+* TShark decodes selected frame, Ethernet, IP, TCP/UDP, DNS and TLS fields; packet payload and raw hex bytes are not requested,
+* data stays **in the local app's memory** and is cleared by Clear, a new capture, or closing the page,
+* capture data is not uploaded or written to a capture file by this app.
 
-Capture runs for a configurable duration (5 – 30 seconds, default 10 s) and a maximum of 3000 packets. Only one capture may run at a time. Results are cleared when the page is closed or when the **Clear** button is used.
+Capture runs for a configurable duration (5, 10 or 30 seconds; default 10) and stops after at most 3000 packets. Only one capture may run at a time. An optional Wireshark display filter (`-Y`, for example `dns` or `tcp.port == 443`) limits which decoded packets TShark returns to the UI; the short live capture can still observe packets that do not match the filter. The separate search box is plain text over displayed fields, not a display filter. Process names in the packet table are best-effort matches by local port against the current connection snapshot, not kernel-level packet attribution. Permission to capture depends on this Mac's Wireshark/dumpcap setup; invalid filters and TShark errors are shown in the tab.
 
 ## Map and explanations
 
-- **Map**: apps on the left, destinations on the right. Lines show live connections; after a capture their width follows captured bytes. Names come from reverse DNS and from TLS server names seen in a capture.
+- **Map**: apps on the left, destinations on the right. Lines show live connections; after a capture their width follows captured bytes. Names can come from reverse DNS and from TLS server names seen in a capture.
+- Click a line, app or destination to open its inspector. The selected route stays highlighted while the live map refreshes.
+- **Security**: review local baseline markers, inspect a process's signature, parent chain, folder and sockets, and request SIGTERM after confirmation. Stopping a process does not block its network traffic.
+- **Map console**: guided commands for live connections, process inspection, temporary TShark capture, local model questions and stopping a process. It is not a general-purpose shell. `restart` is intentionally unavailable until the app can verify how each process should be relaunched.
+- **Flight Map**: choose one currently open connection and follow its process, socket, transport, interface, next-hop gateway and remote endpoint. Process names, socket endpoints and macOS route lookup are real local observations. Intermediate internet routers and the remote socket are outside this laptop's view. Process traffic totals are aggregate counts, not per-socket measurements. Click a stop for a plain explanation and its exact evidence.
+- **Map and Flight Map visuals**: the route plane and airport language are original reading aids. Animated paths do not claim to be packet-level traces. Packet evidence appears only after a TShark capture.
 - **Owner lookup**: selecting a destination runs `whois` for that address. This asks the public internet registry about the address.
-- **Explain with local AI**: sends the shown facts to a model in Ollama on this Mac (`127.0.0.1:11434`, default `gemma4:26b`, override with `EXPLAIN_MODEL`). Nothing goes to a cloud model.
-- **Layers**: a selected packet is shown layer by layer (OSI 7, 4, 3, 2, 1) with a short explanation of each.
+- **Explain with local AI**: sends the selected facts to Ollama on this Mac (`127.0.0.1:11434`, default `gemma4:26b`, override with `EXPLAIN_MODEL`). It does not call a cloud model.
+- **Network console AI**: `models` lists locally installed Ollama models; `ask <question>` uses the configured model and, when one is selected, only that connection's process and endpoint fields.
+- **Layers**: a selected packet shows a simple OSI explanation and expandable TShark-decoded fields. This is a curated field view, not Wireshark's complete protocol tree. The app does not decrypt TLS or show raw packet bytes. Plain-text protocol metadata, including some HTTP details, may be visible.
+
+## License and authorship
+
+Local Network Watcher is open source under the MIT License. Copyright and license notices must be retained in copies or substantial portions. The app credits its author, Tanya Babitskaya.
 
 ## Attention markers
 

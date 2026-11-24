@@ -3,11 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3f0e6">
+  <meta name="theme-color" content="#171d20">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('local-watch-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
   <title>Local Watch — Network activity</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/console.css">
+  <link rel="stylesheet" href="/security.css">
+  <link rel="stylesheet" href="/packet-details.css">
+  <link rel="stylesheet" href="/process-table.css">
+  <link rel="stylesheet" href="/theme.css">
   <script defer src="/app.js"></script>
+  <script defer src="/security.js"></script>
+  <script defer src="/console.js"></script>
   <script defer src="/howitworks.js"></script>
+  <script defer src="/flight-map.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -16,16 +25,18 @@
       <nav class="nav-list">
         <a class="nav-item active" href="#activity" aria-current="page"><span class="nav-icon">◌</span>Activity</a>
         <a class="nav-item" href="#map"><span class="nav-icon">⇄</span>Map</a>
+        <a class="nav-item" href="#security"><span class="nav-icon">⌑</span>Security</a>
         <a class="nav-item" href="#processes"><span class="nav-icon">⌘</span>Processes</a>
         <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
         <a class="nav-item" href="#capture"><span class="nav-icon">◎</span>Capture</a>
+        <a class="nav-item" href="#flight-map"><span class="nav-icon">✈</span>Flight Map</a>
         <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
       </nav>
       <div class="rail-note">ON THIS MAC<br><span>Private by design</span></div>
     </aside>
     <main class="content">
-      <header class="topline"><div><span class="eyebrow">Local network monitor</span><h1>Where things go</h1><p class="intro">A live view of connections open on this Mac.</p></div><div class="live-state"><span class="live-dot"></span><span id="live-label">Connecting…</span></div></header>
-      <section class="summary" aria-label="Current snapshot"><div class="summary-number"><strong id="connection-count">—</strong><span>open connections</span></div><div class="summary-number secondary-number"><strong id="process-count">—</strong><span>active processes</span></div><div class="summary-copy"><span id="sample-state">Reading from this device</span><small id="live-rate">Waiting for first speed sample</small><small id="last-updated">Waiting for first snapshot</small></div><button id="refresh" class="text-button" type="button">Refresh now</button></section>
+      <header class="topline"><div><span class="eyebrow">Local network monitor</span><h1>Where things go</h1><p class="intro">A live view of connections open on this Mac.</p></div><div class="topline-actions"><button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to light theme"><span aria-hidden="true">☼</span><span>Light mode</span></button><div class="live-state"><span class="live-dot"></span><span id="live-label">Connecting…</span></div></div></header>
+      <section class="summary" aria-label="Current snapshot"><div class="summary-number"><strong id="connection-count">—</strong><span>open connections</span></div><div class="summary-number secondary-number"><strong id="process-count">—</strong><span>processes with network counters</span></div><div class="summary-copy"><span id="sample-state">Reading from this device</span><small id="live-rate">Waiting for first speed sample</small><small id="last-updated">Waiting for first snapshot</small></div><button id="refresh" class="text-button" type="button">Refresh now</button></section>
       <section id="activity" class="view active-view" aria-labelledby="activity-heading">
         <div class="section-bar"><div><h2 id="activity-heading">Connection map</h2><p>Open paths from apps on this Mac to remote addresses.</p></div><label class="filter-label" for="filter">Show <select id="filter"><option value="all">All connections</option><option value="new">First seen this session</option></select></label></div>
         <div class="table-head"><span>Process</span><span>Route</span><span>Remote address</span><span>State</span></div>
@@ -37,9 +48,36 @@
         <div id="attention" class="attention" aria-live="polite"></div>
         <div class="map-wrap"><svg id="map-svg" role="img" aria-labelledby="map-heading"></svg></div>
         <div id="map-detail" class="flow-inspector"><div class="inspector-empty">Select an app, a destination or a line to see what it is.</div></div>
+        <section class="console-panel" aria-labelledby="console-heading">
+          <div class="console-head"><div><span class="eyebrow">Local investigation</span><h3 id="console-heading">Network console</h3><p>Run guided inspection commands, capture headers, or ask the local model.</p></div><span class="console-local">● LOCAL</span></div>
+          <div class="console-shortcuts"><button type="button" data-command="help">help</button><button type="button" data-command="connections">connections</button><button type="button" data-command="models">models</button><button type="button" data-command="capture">capture</button></div>
+          <div id="console-output" class="console-output" role="log" aria-live="polite"><div class="console-welcome">Type <code>help</code> to see available investigations. This is a guided console, not a system shell.</div></div>
+          <form id="console-form" class="console-form"><label for="console-input" aria-label="Investigation command">›</label><input id="console-input" autocomplete="off" spellcheck="false" placeholder="help, connections, process 1234, capture 10, ask …"><button class="cap-button" type="submit">Run</button></form>
+          <p class="console-note">No arbitrary shell commands. Packet capture is temporary and asks before starting. Stopping a process sends SIGTERM after confirmation. The local model receives only the question and selected local facts.</p>
+        </section>
       </section>
-      <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><p class="metrics-note">Byte and packet totals are process-level counts since launch. The live rate is calculated from consecutive system snapshots; it is not assigned to one specific connection.</p></section>
+      <section id="security" class="view" aria-labelledby="security-heading">
+        <div class="section-bar"><div><h2 id="security-heading">Security overview</h2><p>Local evidence to help you decide what to inspect.</p></div><span class="security-mode"><i></i> MONITORING ONLY</span></div>
+        <p class="security-intro">A new app or destination is a reason to look closer, not proof of an attack. Start with the process, its parent, signature and open sockets.</p>
+        <div id="security-markers" class="security-markers" aria-live="polite"><p class="attention-quiet">Loading this Mac’s attention markers…</p></div>
+        <div class="security-process-panel">
+          <div class="section-bar"><div><h3>Inspect a connected process</h3><p>Read the executable, parent chain, code signature, working folder and sockets.</p></div></div>
+          <div class="security-controls"><label class="filter-label" for="security-process">Process <select id="security-process"><option value="">Loading live processes…</option></select></label><button id="security-inspect" class="cap-button" type="button">Inspect process</button></div>
+          <div id="security-detail" class="flow-inspector"><div class="inspector-empty">Select a process to review its local system facts.</div></div>
+        </div>
+        <div class="security-limits"><div><b>Stop process</b><p>After inspection and confirmation, sends SIGTERM to a process owned by your account. It may close unsaved work.</p></div><div><b>Network access</b><p>This action does not block or isolate traffic. Network blocking needs a separate macOS firewall integration.</p></div><div><b>Packet contents</b><p>TShark can inspect selected headers during a short capture. It cannot read TLS-encrypted app contents.</p></div></div>
+      </section>
+      <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-tools"><label class="process-all-toggle"><input id="process-show-all" type="checkbox"> Include processes with no network counters</label><label class="filter-label" for="process-search">Find <input id="process-search" type="search" placeholder="process, PID or user"></label><span id="process-list-count" aria-live="polite"></span></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>User</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><nav class="process-pagination" aria-label="Process list pages"><button id="process-prev" type="button" aria-label="Previous page">← Previous</button><span id="process-page" aria-live="polite">Page 1 of 1</span><button id="process-next" type="button" aria-label="Next page">Next →</button></nav><p class="metrics-note">Shows 25 processes per page, with processes sending or receiving data now first. Byte and packet totals are process-level counts since launch, not per-socket measurements. The live rate is calculated from consecutive system snapshots.</p></section>
       <section id="events" class="view" aria-labelledby="events-heading"><div class="section-bar"><div><h2 id="events-heading">Recent events</h2><p>Connection changes observed while this page is open.</p></div><button class="text-button" id="clear-events" type="button">Clear history</button></div><div id="event-list" class="event-list"></div></section>
+      <section id="flight-map" class="view" aria-labelledby="flight-map-heading">
+        <div class="flight-intro"><span class="eyebrow">Live path · selected from this Mac</span><h2 id="flight-map-heading">Follow a connection</h2><p>Choose an open socket. Read its process, endpoints and route evidence from left to right.</p></div>
+        <div class="flight-live-controls"><label class="filter-label" for="flight-connection">Active connection <select id="flight-connection"><option value="">Waiting for live sockets…</option></select></label><span id="flight-counts" class="flight-live-count">Waiting for a live socket</span></div>
+        <div id="flight-graphic" class="flight-graphic" role="group" aria-label="Live connection route"></div>
+        <div class="flight-legend"><span><i class="legend-observed"></i>Observed on this Mac</span><span><i class="legend-route"></i>Route lookup</span><span><i class="legend-hidden"></i>Beyond local visibility</span></div>
+        <article id="flight-detail" class="flight-detail" aria-live="polite"><div class="inspector-empty">Choose a live connection to inspect its path.</div></article>
+        <p id="flight-route-note" class="flight-note">The dotted line is an explanatory route, not a packet trace.</p>
+        <div class="flight-actions"><a class="lesson-action" href="#capture">Inspect packet headers with TShark <span aria-hidden="true">↗</span></a><a class="lesson-action" href="#map">Open network map <span aria-hidden="true">↗</span></a></div>
+      </section>
       <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span id="history-info">Connection history (apps, destination groups, ports, times) on this Mac only</span></div><div><strong>Forget history</strong><span><button id="forget-history" class="text-button" type="button">Delete the learned history</button></span></div><div><strong>Packet inspection</strong><span>Manual TShark capture, headers only, memory only</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture runs only when you start it on the Capture tab, for 5 to 30 seconds. Blocking and isolation need a separate macOS Network Extension.</p></section>
       <section id="capture" class="view" aria-labelledby="capture-heading">
         <div class="section-bar"><div><h2 id="capture-heading">Packet capture</h2><p>Read packet headers for a few seconds with TShark. Off until you start it.</p></div></div>
@@ -50,11 +88,12 @@
           <button id="cap-clear" class="text-button" type="button">Clear</button>
           <span id="cap-status" class="cap-status" aria-live="polite">No capture yet</span>
         </div>
+        <div class="display-filter-row"><label class="filter-label" for="cap-display-filter">Wireshark display filter <input id="cap-display-filter" type="text" spellcheck="false" placeholder="e.g. dns or tcp.port == 443" maxlength="500"></label><small>Filters which decoded packets TShark returns. Leave blank to inspect all packets.</small></div>
         <div id="cap-summary" class="cap-summary" hidden></div>
-        <div class="capture-filter" id="cap-filter-wrap" hidden><label class="filter-label" for="cap-filter">Filter <input id="cap-filter" type="search" placeholder="protocol, host or process"></label></div>
+        <div class="capture-filter" id="cap-filter-wrap" hidden><label class="filter-label" for="cap-filter">Search captured fields <input id="cap-filter" type="search" placeholder="protocol, host or process"></label></div>
         <div class="cap-table-wrap" id="cap-table-wrap" hidden><table class="process-table cap-table"><thead><tr><th>No.</th><th>Time</th><th>Process</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Length</th><th>Info</th></tr></thead><tbody id="cap-rows"></tbody></table></div>
-        <div id="cap-detail" class="flow-inspector"><div class="inspector-empty">Start a capture, then select a packet to see all of its fields.</div></div>
-        <p class="metrics-note">Headers only, kept in this app's memory until you clear them or start a new capture. Nothing is written to disk or sent anywhere. Encrypted traffic stays encrypted; host names come from DNS questions and TLS server names seen in the same capture.</p>
+        <div id="cap-detail" class="flow-inspector"><div class="inspector-empty">Start a capture, then select a packet to inspect its decoded fields.</div></div>
+        <p class="metrics-note">Selected decoded fields only, held in this app's memory until you clear them or start another capture. No capture file or raw packet bytes are saved. Plain-text protocols may expose metadata; encrypted application contents remain encrypted.</p>
         <dialog id="cap-dialog" class="cap-dialog" aria-labelledby="cap-dialog-title">
           <form method="dialog">
             <h3 id="cap-dialog-title">Start packet capture?</h3>
@@ -63,7 +102,7 @@
           </form>
         </dialog>
       </section>
-      <footer class="page-foot"><span>Local Watch</span><span id="source-note">Runs on this Mac · capture only when you start it</span></footer>
+      <footer class="page-foot"><span>Created by Tanya Babitskaya</span><span id="source-note">MIT License · Runs on this Mac · capture only when you start it</span></footer>
     </main>
   </div>
 </body>

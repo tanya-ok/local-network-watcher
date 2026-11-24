@@ -46,22 +46,34 @@ renderMap = function () {
 function diagram(container, { title, svg, parts, intro }) {
   const box = document.createElement('div');
   box.className = 'hiw';
-  box.innerHTML = `<div class="hiw-head"><b>${esc(title)}</b><span class="hiw-steps"><button type="button" class="text-button hiw-prev">Previous</button><button type="button" class="text-button hiw-next">Next step</button></span></div><div class="hiw-canvas">${svg}</div><div class="hiw-card" aria-live="polite"><p>${esc(intro)}</p></div>`;
+  box.innerHTML = `<div class="hiw-head"><div><b>${esc(title)}</b><p class="hiw-intro">${esc(intro)}</p></div><span class="hiw-steps"><button type="button" class="text-button hiw-play">▶ Play journey</button><button type="button" class="text-button hiw-prev">Previous</button><button type="button" class="text-button hiw-next">Next step</button></span></div><div class="hiw-canvas">${svg}</div><div class="hiw-card" aria-live="polite"><p>Select a step to explore it.</p></div>`;
   container.append(box);
   const card = box.querySelector('.hiw-card');
   let current = -1;
+  let timer;
   const show = (i) => {
     current = (i + parts.length) % parts.length;
     box.querySelectorAll('[data-part]').forEach((el) => el.classList.toggle('hiw-active', Number(el.dataset.part) === current));
     const p = parts[current];
     card.style.borderLeftColor = p.color;
-    card.innerHTML = `<span class="hiw-tag" style="background:${p.color}">${esc(p.tag)}</span><h4>${esc(p.name)}</h4>${p.value ? `<code>${esc(p.value)}</code>` : ''}<p>${esc(p.text)}</p>`;
+    card.innerHTML = `<div class="hiw-card-copy"><span class="hiw-tag" style="background:${p.color}">${esc(p.tag)}</span><h4>${esc(p.name)}</h4>${p.value ? `<code>${esc(p.value)}</code>` : ''}<p>${esc(p.text)}</p></div>${p.example || ''}<details class="hiw-engineer"><summary>Engineer view</summary><p>${esc(p.engineer || 'This view explains the selected layer. The live monitor reports only facts it can observe.')}</p></details>`;
   };
   box.addEventListener('click', (e) => {
     const part = e.target.closest('[data-part]');
     if (part) show(Number(part.dataset.part));
     if (e.target.closest('.hiw-next')) show(current + 1);
     if (e.target.closest('.hiw-prev')) show(current - 1);
+    if (e.target.closest('.hiw-play')) {
+      const button = e.target.closest('.hiw-play');
+      if (timer) { clearInterval(timer); timer = undefined; button.textContent = '▶ Play journey'; return; }
+      show(current < 0 ? 0 : current);
+      button.textContent = 'Ⅱ Pause';
+      timer = setInterval(() => {
+        if (!box.isConnected) { clearInterval(timer); timer = undefined; return; }
+        if (current >= parts.length - 1) { clearInterval(timer); timer = undefined; button.textContent = '▶ Play journey'; return; }
+        show(current + 1);
+      }, 2200);
+    }
   });
   box.addEventListener('keydown', (e) => {
     const part = e.target.closest('[data-part]');
@@ -81,24 +93,39 @@ function wrapText(text, max) {
 // 2. Socket path: from the app to the server, hop by hop
 function socketPath(row, ipLabel) {
   const c = roleColor(row.process);
+  const bytesExample = `<div class="byte-story" aria-label="Illustrative text to encrypted bytes example"><span class="byte-story-label">A tiny example · not captured from this connection</span><div class="byte-story-flow"><span class="byte-chip">Hi</span><b>→</b><code>48 69</code><b>→</b><code class="cipher-chip">${'A7 3C 91 D2'}</code></div><small>Text → UTF-8 bytes → illustrative ciphertext. Real TLS output is longer and changes every time.</small></div>`;
   const parts = [
-    { tag: 'Your Mac', name: row.process, value: `PID ${row.pid}`, color: c, text: 'The app wants to talk to a server. It does not touch the network itself; it asks macOS for a socket and writes bytes into it.' },
-    { tag: 'Your Mac', name: 'Local socket', value: row.local, color: '#5f8a5a', text: 'A socket is one end of a conversation: your IP address plus a port number. macOS picked this port for the app, so every reply to this port goes back to this app.' },
-    { tag: 'macOS kernel', name: `${row.protocol} / IP stack`, value: row.state, color: '#7a6a9e', text: row.protocol === 'TCP' ? 'The kernel splits the bytes into TCP segments, numbers them, waits for acknowledgements and resends what is lost. ESTABLISHED means the three-way handshake is done and data can flow.' : 'UDP sends each message as it is, without a connection, order or resends. Fast, used for DNS, calls and QUIC.' },
-    { tag: 'Hardware', name: 'Wi-Fi card', value: 'en0', color: '#4f7a8c', text: 'The packet gets a Wi-Fi frame with MAC addresses for the next hop only, your router, and goes out as radio.' },
-    { tag: 'Home network', name: 'Router', value: 'gateway', color: '#3f8a86', text: 'The router swaps your private address for its public one (NAT), remembers the pair so replies find their way back, and sends the packet to your provider.' },
-    { tag: 'Internet', name: 'Many routers', value: 'TTL counts down', color: '#9a7d3a', text: 'Routers pass the packet along by its destination IP. Each hop lowers the TTL by one. The content stays encrypted if the app uses TLS.' },
-    { tag: 'Server', name: 'Remote socket', value: row.remote, color: '#b0704f', text: `The server listens on this address and port. ${ipLabel} ${portOf(row.remote) === '443' ? 'Port 443 means HTTPS: encrypted web traffic.' : ''}`.trim() },
+    { tag: 'Dispatch desk', name: row.process, value: `PID ${row.pid}`, color: c, text: 'The app is our sender at the dispatch desk. It asks macOS for a communication endpoint, then hands data to the system; it does not operate the Wi-Fi hardware itself.', engineer: 'A process calls socket() to obtain a file descriptor, then connect() for a remote peer. The descriptor is a handle to a kernel object, not the network address itself.' },
+    { tag: 'OS gate', name: 'Socket · a managed doorway', value: row.local, color: '#5f8a5a', text: 'Airport gates are only an analogy: the socket is a communication endpoint managed by macOS. Its file-descriptor handle is how the app uses that endpoint.', engineer: `A TCP connection is distinguished by its protocol and the local and remote IP:port pairs. The local port is often ephemeral. Current observed endpoint: ${row.local}.` },
+    { tag: 'Cargo marks', name: 'Data becomes bytes', value: '“Hi” → 48 69', color: '#9a7d3a', text: 'The message is like cargo with a machine-readable label. UTF-8 represents H and i as the bytes 48 and 69 in hexadecimal.', engineer: 'Encoding is application-level. This is a teaching example only; this monitor does not see the selected connection’s application text.', example: bytesExample },
+    { tag: 'Sealed cargo', name: 'TLS can seal the message', value: 'Readable → scrambled', color: '#7a6a9e', text: 'When an app uses TLS, both ends agree how to protect the message. It is like sealing cargo for the intended recipient; route information can still be visible.', engineer: 'TLS handshake establishes traffic keys; TLS records protect application data. Encryption is not inferred from port 443 alone. This animation is illustrative, not evidence that this selected flow used TLS.', example: bytesExample },
+    { tag: 'Route slip', name: `${row.protocol} / IP`, value: row.state, color: '#4f7a8c', text: 'Delivery labels help move cargo toward its destination. Routers use the IP destination to choose the next hop; they do not need to read the message.', engineer: row.protocol === 'TCP' ? 'TCP carries byte-stream data in numbered segments, acknowledges delivery and may retransmit. IP routes packets. Actual segmentation depends on path MTU and timing.' : 'This observed flow is UDP. UDP preserves message boundaries but does not provide TCP-style ordering or retransmission; apps may use QUIC above it.' },
+    { tag: 'Transit hubs', name: 'Wi-Fi · router · next hops', value: 'One hop at a time', color: '#3f8a86', text: 'Your Wi-Fi router is the first transit hub. Other routers pass the packet from one network to the next; each link is a short leg of the journey.', engineer: 'The link frame is replaced per link. IP source/destination usually persist end-to-end, subject to NAT and routing. TTL/Hop Limit decreases at each router.' },
+    { tag: 'Arrivals', name: 'Remote server', value: row.remote, color: '#b0704f', text: `The destination server receives the data. If TLS is in use, the server with matching keys can decrypt it and pass it to its app. ${ipLabel}`, engineer: `Observed remote endpoint: ${row.remote}. A socket snapshot shows endpoints and state; it does not prove what payload was exchanged or whether TLS was negotiated.` },
   ];
-  const W = 900, y = 70, step = W / parts.length;
+  const W = 1120, y = 120, step = W / parts.length;
+  const icons = [
+    `<rect x="-24" y="-17" width="48" height="34" rx="3" fill="none" stroke="${c}" stroke-width="2.5"/><path d="M-30 22h60l-5 5h-50z" fill="${c}"/><circle cx="15" cy="-8" r="2.5" fill="${c}"/><path d="M-16 -7h20M-16 0h28M-16 7h12" stroke="${c}" stroke-width="2" stroke-linecap="round"/>`,
+    `<path d="M-24 24v-25a24 24 0 0 1 48 0v25" fill="none" stroke="${c}" stroke-width="3"/><path d="M-13 24V3a13 13 0 0 1 26 0v21" fill="${c}" fill-opacity=".13" stroke="${c}" stroke-width="2"/><circle cx="7" cy="5" r="2" fill="${c}"/>`,
+    `<path d="M0-22 25-10 0 2-25-10zM-25-10v22L0 25V2M25-10v22L0 25" fill="none" stroke="${c}" stroke-width="2.5" stroke-linejoin="round"/><path d="M-10-10v8m7-12v8m7-4v8m7-12v8" stroke="${c}" stroke-width="2"/>`,
+    `<rect x="-22" y="-4" width="44" height="30" rx="5" fill="${c}" fill-opacity=".14" stroke="${c}" stroke-width="2.5"/><path d="M-12-4v-8a12 12 0 0 1 24 0v8" fill="none" stroke="${c}" stroke-width="3"/><circle cx="0" cy="9" r="3" fill="${c}"/><path d="M0 12v5" stroke="${c}" stroke-width="2.5"/>`,
+    `<path d="M-20-24h28l12 12v36h-40z" fill="none" stroke="${c}" stroke-width="2.5" stroke-linejoin="round"/><path d="M8-24v13h12M-12-4h20M-12 3h14M-12 10h6" stroke="${c}" stroke-width="2" stroke-linecap="round"/><path d="M-10 19h18" stroke="${c}" stroke-width="2" stroke-dasharray="2 3"/>`,
+    `<path d="M-23 8h46v17h-46z" fill="${c}" fill-opacity=".13" stroke="${c}" stroke-width="2.5"/><path d="M-14 8V1m28 7V1M-18-4a18 18 0 0 1 36 0M-11-4a11 11 0 0 1 22 0M-4-4a4 4 0 0 1 8 0" fill="none" stroke="${c}" stroke-width="2.5" stroke-linecap="round"/><circle cx="13" cy="17" r="2" fill="${c}"/>`,
+    `<rect x="-20" y="-25" width="40" height="50" rx="4" fill="none" stroke="${c}" stroke-width="2.5"/><path d="M-12-14h24v8h-24zM-12 0h24v8h-24zM-12 14h24v6h-24z" fill="${c}" fill-opacity=".12" stroke="${c}" stroke-width="1.7"/><circle cx="8" cy="-10" r="1.7" fill="${c}"/><circle cx="8" cy="4" r="1.7" fill="${c}"/><circle cx="8" cy="17" r="1.7" fill="${c}"/>`,
+  ];
   const nodes = parts.map((p, i) => {
     const x = step * i + step / 2;
-    const label = wrapText(p.name, 14).map((l, k) => `<text x="${x}" y="${y + 46 + k * 14}" text-anchor="middle" class="hiw-label">${esc(l)}</text>`).join('');
-    return `<g data-part="${i}" tabindex="0" role="button" class="hiw-node"><text x="${x}" y="${y - 36}" text-anchor="middle" class="hiw-tagtext" fill="${p.color}">${esc(p.tag)}</text><circle cx="${x}" cy="${y}" r="22" fill="${p.color}" fill-opacity=".18" stroke="${p.color}" stroke-width="2"/><text x="${x}" y="${y + 5}" text-anchor="middle" class="hiw-num" fill="${p.color}">${i + 1}</text>${label}</g>`;
+    const title = wrapText(p.name, 18).slice(0, 2).map((l, k) => `<text x="${x}" y="${y + 73 + k * 14}" text-anchor="middle" class="hiw-label">${esc(l)}</text>`).join('');
+    const shortValue = String(p.value).length > 20 ? `${String(p.value).slice(0, 17)}…` : p.value;
+    const value = wrapText(shortValue, 20).slice(0, 2).map((l, k) => `<text x="${x}" y="${y + 106 + k * 11}" text-anchor="middle" class="hiw-value">${esc(l)}</text>`).join('');
+    return `<g data-part="${i}" tabindex="0" role="button" aria-label="Step ${i + 1}: ${esc(p.tag)} — ${esc(p.name)}" class="hiw-node journey-node"><circle class="journey-halo" cx="${x}" cy="${y}" r="43" fill="${p.color}" fill-opacity=".09" stroke="${p.color}" stroke-opacity=".32" stroke-width="1.4"/><g class="journey-icon" transform="translate(${x} ${y})">${icons[i]}</g><text x="${x}" y="${y + 58}" text-anchor="middle" class="journey-caption" fill="${p.color}">${esc(p.tag)}</text>${title}${value}</g>`;
   }).join('');
-  const links = parts.slice(1).map((p, i) => `<line x1="${step * i + step / 2 + 24}" y1="${y}" x2="${step * (i + 1) + step / 2 - 24}" y2="${y}" stroke="var(--line)" stroke-width="2" marker-end="url(#hiw-arrow)"/>`).join('');
-  const svg = `<svg viewBox="0 0 ${W} 170" role="img" aria-label="Path of this connection"><defs><marker id="hiw-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>${links}${nodes}</svg>`;
-  return { title: 'How this connection works, step by step', svg, parts, intro: 'Press a circle or "Next step" to follow one message from the app to the server.' };
+  const links = parts.slice(1).map((p, i) => {
+    const x1 = step * i + step / 2 + 44, x2 = step * (i + 1) + step / 2 - 44;
+    return `<path class="journey-link" d="M${x1} ${y} H${x2}" marker-end="url(#journey-arrow)"/>`;
+  }).join('');
+  const svg = `<svg viewBox="0 0 ${W} 280" role="img" aria-label="Illustrated airport journey for one example network message, from the app on this Mac through network hubs to a remote server"><defs><marker id="journey-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs><rect x="1" y="1" width="${W - 2}" height="278" rx="18" fill="#f1f3ed" stroke="var(--line)"/><path d="M20 245 H1100" fill="none" stroke="#dce5dc" stroke-width="1"/><text x="28" y="25" class="journey-lane">DEPARTURE · THIS MAC</text><text x="560" y="25" text-anchor="middle" class="journey-lane">ONE MESSAGE · STORY VIEW</text><text x="1092" y="25" text-anchor="end" class="journey-lane">ARRIVAL · REMOTE</text><path id="courier-route" class="courier-route" d="M80 48 C320 25 800 25 1040 48"/>${links}<g class="courier-plane"><path d="M0 -5 L15 0 L0 5 L3 1 L-5 1 L-7 4 L-9 4 L-8 0 L-9 -4 L-7 -4 L-5 -1 L3 -1 Z"><animateMotion class="journey-plane-motion" dur="7s" repeatCount="indefinite" rotate="auto"><mpath href="#courier-route"/></animateMotion></path></g>${nodes}<text x="28" y="268" class="journey-foot">The plane is a guide to one illustrative message, not a packet counter. Real packet boundaries can differ.</text></svg>`;
+  return { title: 'The flight path of a connection', svg, parts, intro: 'A tiny courier plane guides one example message from the app to a server. Airport language is a memory aid; select a card to see the real network term and open Engineer view for details.' };
 }
 
 const prevSelectOnMap = selectOnMap;
@@ -232,7 +259,6 @@ processView.addEventListener('click', (e) => {
   ${conns.length ? `<ul class="proc-conns">${conns.slice(0, 6).map((c) => `<li><span>${esc(c.local)}</span><b>→</b><span>${esc(destLabel(hostOf(c.remote)))} <small>${esc(c.remote)}</small></span></li>`).join('')}</ul>` : ''}
   <p class="learn-note"><b>Process</b>: a running program. One app can run as several processes. <b>PID</b>: the number macOS gives each process while it runs. <b>Packets</b>: the small pieces data travels in, usually up to 1.5 KB each. These totals count since the process started.</p>${explainBlock()}`;
   bindExplain(processCard, { kind: 'process', process: r.process, category_here: d.kind, received: formatBytes(r.receivedBytes), sent: formatBytes(r.sentBytes), open_connections: conns.map((c) => destLabel(hostOf(c.remote))).slice(0, 8).join(', ') });
-  if (conns[0]) diagram(processCard, socketPath(conns[0], `Its name here: ${destLabel(hostOf(conns[0].remote))}.`));
 });
 
 
@@ -283,8 +309,6 @@ eventList.addEventListener('click', (e) => {
   <div class="inspector-grid"><div><span>From (your socket)</span><strong>${esc(ev.local || '')}</strong></div><div><span>To</span><strong>${esc(destLabel(ip))} · ${esc(ev.remote)}</strong></div><div><span>Protocol</span><strong>${esc(ev.protocol || '')}</strong></div><div><span>When</span><strong>${esc(ev.time.toLocaleString())}</strong></div></div>
   <p class="learn-note">${open ? '<b>Opened</b>: the app and the server finished the TCP handshake (SYN, SYN+ACK, ACK) and can now send data. Short-lived connections are normal: apps open one, fetch something, and close it.' : '<b>Closed</b>: one side sent FIN to finish politely, or RST to cut it off, or the app quit. The socket port on your Mac is free again a little later.'}</p>${explainBlock()}`;
   bindExplain(eventCard, { kind: `connection ${open ? 'opened' : 'closed'}`, process: ev.process, category_here: d.kind, destination: destLabel(ip), remote: ev.remote, protocol: ev.protocol });
-  const row = { pid: ev.pid, process: ev.process, protocol: ev.protocol || 'TCP', local: ev.local || '', remote: ev.remote, state: open ? 'ESTABLISHED' : 'CLOSED' };
-  diagram(eventCard, socketPath(row, `Its name here: ${destLabel(ip)}.`));
 });
 
 // 6. Motion: traffic you can see. Speed follows the app's current traffic.

@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reverse } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accept, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
@@ -28,8 +29,11 @@ function resetCapture() {
 }
 
 const TSHARK = '/Applications/Wireshark.app/Contents/MacOS/tshark';
-const FIELDS = ['frame.number', 'frame.time_relative', 'frame.len', 'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport', '_ws.col.Protocol', 'dns.qry.name', 'tls.handshake.extensions_server_name', 'http.host', '_ws.col.Info', 'eth.src', 'eth.dst', 'ip.ttl', 'tcp.flags.str', 'tls.record.version'];
-const KEYS = ['frame', 'time', 'len', 'ipSrc', 'ipDst', 'ipv6Src', 'ipv6Dst', 'tcpSrc', 'tcpDst', 'udpSrc', 'udpDst', 'protocol', 'dnsQry', 'tlsSNI', 'httpHost', 'info', 'ethSrc', 'ethDst', 'ttl', 'tcpFlags', 'tlsVersion'];
+// Capture decoded header fields only. We deliberately do not request -w, -x,
+// or application payload fields, so this prototype never writes a PCAP or
+// presents packet bytes as if they were safely inspectable text.
+const FIELDS = ['frame.number', 'frame.time_relative', 'frame.len', 'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport', '_ws.col.Protocol', 'dns.qry.name', 'tls.handshake.extensions_server_name', 'http.host', '_ws.col.Info', 'eth.src', 'eth.dst', 'ip.ttl', 'tcp.flags.str', 'tls.record.version', 'frame.protocols', 'frame.cap_len', 'eth.type', 'ip.id', 'ip.flags', 'ip.proto', 'ip.checksum', 'ipv6.nxt', 'ipv6.plen', 'ipv6.hlim', 'tcp.seq_raw', 'tcp.ack_raw', 'tcp.hdr_len', 'tcp.len', 'tcp.flags', 'tcp.window_size_value', 'tcp.checksum', 'tcp.analysis.retransmission', 'udp.length', 'udp.checksum', 'dns.id', 'dns.flags', 'dns.qry.type', 'dns.resp.name', 'dns.resp.ttl', 'dns.a', 'dns.aaaa', 'tls.record.content_type', 'tls.record.length', 'tls.handshake.type', 'tls.handshake.version', 'tls.handshake.ciphersuite'];
+const KEYS = ['frame', 'time', 'len', 'ipSrc', 'ipDst', 'ipv6Src', 'ipv6Dst', 'tcpSrc', 'tcpDst', 'udpSrc', 'udpDst', 'protocol', 'dnsQry', 'tlsSNI', 'httpHost', 'info', 'ethSrc', 'ethDst', 'ttl', 'tcpFlags', 'tlsVersion', 'frameProtocols', 'capturedLength', 'ethType', 'ipId', 'ipFlags', 'ipProto', 'ipChecksum', 'ipv6Next', 'ipv6Length', 'ipv6HopLimit', 'tcpSequence', 'tcpAck', 'tcpHeaderLength', 'tcpPayloadLength', 'tcpFlagsRaw', 'tcpWindow', 'tcpChecksum', 'tcpRetransmission', 'udpLength', 'udpChecksum', 'dnsId', 'dnsFlags', 'dnsQueryType', 'dnsAnswerName', 'dnsTtl', 'dnsA', 'dnsAAAA', 'tlsContentType', 'tlsRecordLength', 'tlsHandshakeType', 'tlsHandshakeVersion', 'tlsCipherSuite'];
 
 function parsePacket(line) {
   const fields = line.split('\t');
@@ -159,6 +163,40 @@ const server = createServer(async (req, res) => {
     res.writeHead(facts ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(facts || { error: 'Process not found.' }));
     return;
   }
+  if (req.method === 'GET' && pathname === '/api/route') {
+    const ip = new URL(req.url, 'http://localhost').searchParams.get('ip') || '';
+    if (!isIP(ip)) { res.writeHead(400, { 'content-type':'application/json; charset=utf-8' }).end(JSON.stringify({ error:'A numeric IP address is required.' })); return; }
+    try {
+      const { stdout } = await exec('/sbin/route', ['-n', 'get', ip], { timeout:2500, maxBuffer:16384 });
+      const field = (name) => stdout.match(new RegExp(`^\\s*${name}:\\s*(.+)$`, 'm'))?.[1]?.trim() || '';
+      res.writeHead(200, { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' }).end(JSON.stringify({ destination:field('destination'), gateway:field('gateway'), interface:field('interface'), flags:field('flags') }));
+    } catch { res.writeHead(503, { 'content-type':'application/json; charset=utf-8' }).end(JSON.stringify({ error:'macOS route information is unavailable for this endpoint.' })); }
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/process/stop') {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    try {
+      const { pid, confirm } = JSON.parse(body || '{}');
+      if (confirm !== true || !Number.isSafeInteger(pid) || pid < 2) throw new Error('Explicit confirmation and a valid process ID are required.');
+      if (pid === process.pid || pid === process.ppid) throw new Error('The monitor itself cannot be stopped here.');
+      const facts = await processFacts(pid);
+      if (!facts) throw new Error('That process is no longer running.');
+      const me = (await exec('/usr/bin/id', ['-un'])).stdout.trim();
+      if (facts.user !== me) throw new Error('Only processes owned by your current macOS account can be stopped.');
+      let ancestor = process.ppid;
+      for (let i = 0; i < 12 && ancestor > 1; i++) {
+        if (ancestor === pid) throw new Error('A parent process of this monitor cannot be stopped here.');
+        const row = (await exec('/bin/ps', ['-o', 'ppid=', '-p', String(ancestor)])).stdout.trim();
+        ancestor = Number(row) || 0;
+      }
+      process.kill(pid, 'SIGTERM');
+      res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'signal-sent', signal: 'SIGTERM', pid, process: facts.command.split(' ')[0] }));
+    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); }
+    return;
+  }
   if (req.method === 'GET' && pathname === '/api/markers') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), markers: currentMarkers() }));
     return;
@@ -224,6 +262,36 @@ const server = createServer(async (req, res) => {
     }
     return;
   }
+  if (req.method === 'GET' && pathname === '/api/models') {
+    try {
+      const response = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(2500) });
+      if (!response.ok) throw new Error('Ollama did not respond.');
+      const data = await response.json();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ models: (data.models || []).map((m) => m.name), defaultModel: EXPLAIN_MODEL }));
+    } catch { res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'Ollama is not reachable on this Mac.' })); }
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/ask') {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 2048) break; }
+    try {
+      const { question, context = {} } = JSON.parse(body || '{}');
+      if (typeof question !== 'string' || !question.trim() || question.length > 1200) throw new Error('Enter a question up to 1,200 characters.');
+      if (!context || typeof context !== 'object' || Array.isArray(context)) throw new Error('Connection context must be an object.');
+      const allowed = ['process', 'pid', 'protocol', 'local', 'remote', 'state'];
+      const facts = Object.entries(context).filter(([key, value]) => allowed.includes(key) && value != null).map(([key, value]) => `${key}: ${String(value).slice(0, 200)}`).join('\n');
+      const response = await fetch('http://127.0.0.1:11434/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(120000), body: JSON.stringify({ model: EXPLAIN_MODEL, stream: false, think: false, options: { temperature: 0.2, num_predict: 350 }, messages: [
+        { role: 'system', content: 'You are a cautious network investigation helper for a Mac user. Explain concepts in plain English. Do not claim maliciousness without evidence, and do not suggest executing shell commands. State uncertainty.' },
+        { role: 'user', content: `Question: ${question.trim()}${facts ? `\n\nSelected local connection facts:\n${facts}` : ''}` },
+      ] }) });
+      if (!response.ok) throw new Error(`Local model returned ${response.status}.`);
+      const data = await response.json();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ text: data.message?.content?.trim() || 'No answer.', model: EXPLAIN_MODEL }));
+    } catch (e) { res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); }
+    return;
+  }
   // Capture endpoints
   if (pathname.startsWith('/api/capture') && req.method !== 'GET') {
     const origin = req.headers.origin || '';
@@ -245,14 +313,15 @@ const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) { body += chunk; if (body.length > 2048) break; }
     try {
-      const { interface: iface, seconds, confirm } = JSON.parse(body || '{}');
+      const { interface: iface, seconds, displayFilter = '', confirm } = JSON.parse(body || '{}');
       if (confirm !== true) throw new Error('Confirmation required.');
       if (captureState.state === 'running') throw new Error('A capture is already running.');
       const duration = Number(seconds);
       if (![5, 10, 30].includes(duration)) throw new Error('Duration must be 5, 10 or 30 seconds.');
+      if (typeof displayFilter !== 'string' || displayFilter.length > 500 || /[\0\r\n]/.test(displayFilter)) throw new Error('Display filter must be one line and 500 characters or fewer.');
       const names = (await listInterfaces()).map((i) => i.name);
       if (typeof iface !== 'string' || !names.includes(iface)) throw new Error('Unknown network interface.');
-      const args = ['-i', iface, '-a', `duration:${duration}`, '-c', '3000', '-l', '-n', '-T', 'fields', '-E', 'separator=/t', '-E', 'occurrence=f', ...FIELDS.flatMap((f) => ['-e', f])];
+      const args = ['-i', iface, '-a', `duration:${duration}`, '-c', '3000', '-l', '-n', ...(displayFilter ? ['-Y', displayFilter] : []), '-T', 'fields', '-E', 'separator=/t', '-E', 'occurrence=f', ...FIELDS.flatMap((f) => ['-e', f])];
       const proc = spawn(TSHARK, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       captureState = { state: 'running', startedAt: new Date().toISOString(), seconds: duration, interface: iface, packets: [], error: null, proc };
       const mine = captureState;

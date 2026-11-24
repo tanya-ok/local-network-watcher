@@ -2,3 +2,13 @@
 node_modules/
 *.log
 target/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Paid book drafts and internal product research stay outside the app repository.
+/docs/book/
+/docs/book-proposal.md
+/docs/research/

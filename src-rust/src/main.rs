@@ -135,7 +135,7 @@ fn csv_fields(line: &str) -> Vec<String> {
 
 fn process_names() -> HashMap<u32, (String, String)> {
     let Ok(output) = Command::new("/bin/ps")
-        .args(["-axww", "-o", "pid=,user=,comm="])
+        .args(["-Aww", "-o", "pid=,user=,comm="])
         .output()
     else {
         return HashMap::new();
@@ -202,6 +202,37 @@ fn parse_nettop(text: &str, names: &HashMap<u32, (String, String)>) -> Vec<Proce
     rows
 }
 
+fn all_processes(
+    names: &HashMap<u32, (String, String)>,
+    traffic: &[ProcessTraffic],
+) -> Vec<ProcessTraffic> {
+    let traffic_by_pid: HashMap<u32, &ProcessTraffic> =
+        traffic.iter().map(|row| (row.pid, row)).collect();
+    let mut rows = names
+        .iter()
+        .map(|(pid, (process, user))| {
+            traffic_by_pid.get(pid).map_or_else(
+                || ProcessTraffic {
+                    pid: *pid,
+                    process: process.clone(),
+                    user: user.clone(),
+                    received_bytes: 0,
+                    sent_bytes: 0,
+                    received_packets: 0,
+                    sent_packets: 0,
+                },
+                |row| (**row).clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        (b.received_bytes + b.sent_bytes)
+            .cmp(&(a.received_bytes + a.sent_bytes))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+    rows
+}
+
 fn json_string(value: &str) -> String {
     let mut output = String::with_capacity(value.len() + 2);
     output.push('"');
@@ -259,6 +290,7 @@ fn main() {
         Ok(text) => (parse_nettop(&text, &names), None),
         Err(error) => (Vec::new(), Some(error)),
     };
+    let all_processes = all_processes(&names, &processes);
     let sampled_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -294,12 +326,28 @@ fn main() {
         })
         .collect::<Vec<_>>()
         .join(",");
+    let all_process_rows = all_processes
+        .iter()
+        .map(|row| {
+            format!(
+                "{{\"pid\":{},\"process\":{},\"user\":{},\"receivedBytes\":{},\"sentBytes\":{},\"receivedPackets\":{},\"sentPackets\":{}}}",
+                row.pid,
+                json_string(&row.process),
+                json_string(&row.user),
+                row.received_bytes,
+                row.sent_bytes,
+                row.received_packets,
+                row.sent_packets
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let warning = metrics_warning
         .as_deref()
         .map(json_string)
         .unwrap_or_else(|| "null".to_string());
     println!(
-        "{{\"sampledAt\":{},\"source\":\"macOS nettop + lsof · Rust core\",\"refreshSeconds\":3,\"connections\":[{}],\"processes\":[{}],\"metricsWarning\":{}}}",
-        sampled_at, connection_rows, process_rows, warning
+        "{{\"sampledAt\":{},\"source\":\"macOS nettop + lsof · Rust core\",\"refreshSeconds\":3,\"connections\":[{}],\"processes\":[{}],\"allProcesses\":[{}],\"metricsWarning\":{}}}",
+        sampled_at, connection_rows, process_rows, all_process_rows, warning
     );
 }

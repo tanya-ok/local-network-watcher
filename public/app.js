@@ -1,5 +1,11 @@
 const list = document.querySelector('#connection-list');
 const processList = document.querySelector('#process-list');
+const processShowAll = document.querySelector('#process-show-all');
+const processSearch = document.querySelector('#process-search');
+const processListCount = document.querySelector('#process-list-count');
+const processPrev = document.querySelector('#process-prev');
+const processNext = document.querySelector('#process-next');
+const processPageLabel = document.querySelector('#process-page');
 const eventList = document.querySelector('#event-list');
 const count = document.querySelector('#connection-count');
 const liveLabel = document.querySelector('#live-label');
@@ -14,6 +20,10 @@ let firstSnapshot = true;
 let activeRows = [];
 let lastMetricSample = 0;
 let currentProcessStats = new Map();
+let networkProcessRows = [];
+let allProcessRows = [];
+let processPage = 1;
+const processPageSize = 25;
 let busy = false;
 
 function esc(value) {
@@ -56,19 +66,49 @@ function formatRate(value) {
   if (amount < 1000) return `${amount.toFixed(0)} B/s`;
   return `${formatBytes(amount)}/s`;
 }
-function renderProcesses(processes, sampledAt) {
+function renderProcessTable() {
+  const source = processShowAll.checked ? allProcessRows : networkProcessRows;
+  const query = processSearch.value.trim().toLowerCase();
+  const shown = source.filter((row) => !query || `${row.process} ${row.pid} ${row.user}`.toLowerCase().includes(query));
+  shown.sort((a, b) => {
+    const rateA = (a.receivedRate || 0) + (a.sentRate || 0);
+    const rateB = (b.receivedRate || 0) + (b.sentRate || 0);
+    return Number(rateB > 0) - Number(rateA > 0) || rateB - rateA || ((b.receivedBytes + b.sentBytes) - (a.receivedBytes + a.sentBytes)) || String(a.process).localeCompare(String(b.process));
+  });
+  const activeCount = shown.filter((row) => (row.receivedRate || 0) + (row.sentRate || 0) > 0).length;
+  const pageCount = Math.max(1, Math.ceil(shown.length / processPageSize));
+  processPage = Math.min(processPage, pageCount);
+  const start = (processPage - 1) * processPageSize;
+  const pageRows = shown.slice(start, start + processPageSize);
+  const end = Math.min(start + processPageSize, shown.length);
+  processListCount.textContent = shown.length ? `${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${shown.length.toLocaleString()} · ${activeCount.toLocaleString()} active now` : '0 processes';
+  processPageLabel.textContent = `Page ${processPage} of ${pageCount}`;
+  processPrev.disabled = processPage <= 1;
+  processNext.disabled = processPage >= pageCount;
+  processList.innerHTML = pageRows.length ? pageRows.map((row) => `<tr><th scope="row"><span class="process-name">${esc(row.process)}</span><small>PID ${esc(row.pid)}</small></th><td>${esc(row.user || 'Unknown')}</td><td>${formatBytes(row.receivedBytes)}</td><td>${formatBytes(row.sentBytes)}</td><td>${Number(row.receivedPackets).toLocaleString()}</td><td>${Number(row.sentPackets).toLocaleString()}</td><td><span class="rate-in">↓ ${formatRate(row.receivedRate)}</span><small class="rate-out">↑ ${formatRate(row.sentRate)}</small></td></tr>`).join('') : '<tr><td colspan="7" class="empty-cell">No processes match this view.</td></tr>';
+}
+processShowAll.addEventListener('change', () => { processPage = 1; renderProcessTable(); });
+processSearch.addEventListener('input', () => { processPage = 1; renderProcessTable(); });
+processPrev.addEventListener('click', () => { processPage = Math.max(1, processPage - 1); renderProcessTable(); });
+processNext.addEventListener('click', () => { processPage += 1; renderProcessTable(); });
+
+function renderProcesses(processes, sampledAt, inventory = processes) {
   const elapsed = lastMetricSample ? Math.max(0.1, (sampledAt - lastMetricSample) / 1000) : 0;
-  const rows = processes.map((process) => {
+  const rows = inventory.map((process) => {
     const previous = previousProcesses.get(process.pid);
-    const receivedRate = previous && elapsed ? Math.max(0, (process.receivedBytes - previous.receivedBytes) / elapsed) : 0;
-    const sentRate = previous && elapsed ? Math.max(0, (process.sentBytes - previous.sentBytes) / elapsed) : 0;
+    const sameProcess = previous && previous.process === process.process;
+    const receivedRate = sameProcess && elapsed ? Math.max(0, (process.receivedBytes - previous.receivedBytes) / elapsed) : 0;
+    const sentRate = sameProcess && elapsed ? Math.max(0, (process.sentBytes - previous.sentBytes) / elapsed) : 0;
     previousProcesses.set(process.pid, process);
     return { ...process, receivedRate, sentRate };
   }).sort((a, b) => (b.receivedBytes + b.sentBytes) - (a.receivedBytes + a.sentBytes));
+  const rowByPid = new Map(rows.map((row) => [row.pid, row]));
+  networkProcessRows = processes.map((process) => rowByPid.get(process.pid) || { ...process, receivedRate: 0, sentRate: 0 });
+  allProcessRows = rows;
   currentProcessStats = new Map(rows.map((row) => [row.pid, row]));
-  document.querySelector('#process-count').textContent = String(rows.length);
-  document.querySelector('#live-rate').textContent = `${formatRate(rows.reduce((sum, row) => sum + row.receivedRate, 0))} in · ${formatRate(rows.reduce((sum, row) => sum + row.sentRate, 0))} out`;
-  processList.innerHTML = rows.length ? rows.map((row) => `<tr><th scope="row"><span class="process-name">${esc(row.process)}</span><small>PID ${esc(row.pid)}</small></th><td>${formatBytes(row.receivedBytes)}</td><td>${formatBytes(row.sentBytes)}</td><td>${Number(row.receivedPackets).toLocaleString()}</td><td>${Number(row.sentPackets).toLocaleString()}</td><td><span class="rate-in">↓ ${formatRate(row.receivedRate)}</span><small class="rate-out">↑ ${formatRate(row.sentRate)}</small></td></tr>`).join('') : '<tr><td colspan="6" class="empty-cell">No process counters are visible right now.</td></tr>';
+  document.querySelector('#process-count').textContent = String(networkProcessRows.length);
+  document.querySelector('#live-rate').textContent = `${formatRate(networkProcessRows.reduce((sum, row) => sum + row.receivedRate, 0))} in · ${formatRate(networkProcessRows.reduce((sum, row) => sum + row.sentRate, 0))} out`;
+  renderProcessTable();
   lastMetricSample = sampledAt;
 }
 function addEvent(text, date = new Date(), meta = {}) {
@@ -106,7 +146,7 @@ async function refresh() {
       }
     }
     renderConnections(rows);
-    renderProcesses(data.processes || [], sampleAt);
+    renderProcesses(data.processes || [], sampleAt, data.allProcesses || data.processes || []);
     for (const row of rows) known.add([row.pid, row.protocol, row.local, row.remote].join('|'));
     firstSnapshot = false;
     const date = new Date(data.sampledAt);
@@ -133,6 +173,36 @@ for (const link of document.querySelectorAll('.nav-item')) {
     document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active-view', `#${view.id}` === link.hash));
   });
 }
+// Direct links such as /#map must activate the requested view on first load.
+function syncViewToHash() {
+  const target = document.querySelector(`.nav-item[href="${location.hash}"]`);
+  if (!target) return;
+  document.querySelectorAll('.nav-item').forEach((item) => { item.classList.remove('active'); item.removeAttribute('aria-current'); });
+  target.classList.add('active');
+  target.setAttribute('aria-current', 'page');
+  document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active-view', `#${view.id}` === target.hash));
+  // Wait until the map filter and other page state have initialized below.
+  if (target.hash === '#map') setTimeout(() => renderMap(), 0);
+}
+const themeToggle = document.querySelector('#theme-toggle');
+function applyTheme(theme) {
+  const selected = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = selected;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', selected === 'dark' ? '#171d20' : '#f3f0e6');
+  if (themeToggle) {
+    const next = selected === 'dark' ? 'light' : 'dark';
+    themeToggle.setAttribute('aria-label', `Switch to ${next} theme`);
+    themeToggle.innerHTML = `<span aria-hidden="true">${next === 'light' ? '☼' : '◐'}</span><span>${next === 'light' ? 'Light' : 'Dark'} mode</span>`;
+  }
+}
+applyTheme(document.documentElement.dataset.theme || 'dark');
+themeToggle?.addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  try { localStorage.setItem('local-watch-theme', next); } catch { /* Theme still works for this page. */ }
+});
+syncViewToHash();
+window.addEventListener('hashchange', syncViewToHash);
 document.querySelector('#refresh').addEventListener('click', refresh);
 document.querySelector('#clear-events').addEventListener('click', () => { history.length = 0; renderEvents(); });
 filter.addEventListener('change', applyFilter);
@@ -150,7 +220,7 @@ refresh();
 window.setInterval(refresh, 3000);
 // Packet capture
 const cap = {
-  iface: document.querySelector('#cap-iface'), dur: document.querySelector('#cap-dur'), start: document.querySelector('#cap-start'),
+  iface: document.querySelector('#cap-iface'), dur: document.querySelector('#cap-dur'), start: document.querySelector('#cap-start'), displayFilter: document.querySelector('#cap-display-filter'),
   clear: document.querySelector('#cap-clear'), status: document.querySelector('#cap-status'), summary: document.querySelector('#cap-summary'),
   filterWrap: document.querySelector('#cap-filter-wrap'), filter: document.querySelector('#cap-filter'), tableWrap: document.querySelector('#cap-table-wrap'),
   rows: document.querySelector('#cap-rows'), detail: document.querySelector('#cap-detail'), dialog: document.querySelector('#cap-dialog'), dialogText: document.querySelector('#cap-dialog-text'),
@@ -204,12 +274,26 @@ function renderCapture() {
   const shown = capPackets.map((p, i) => [p, i]).filter(([p]) => !q || [p.protocol, p.src, p.dst, p.srcName, p.dstName, p.process, p.dnsQry, p.info].join(' ').toLowerCase().includes(q));
   cap.rows.innerHTML = shown.slice(0, 1500).map(([p, i]) => `<tr data-i="${i}" tabindex="0"><td>${esc(p.frame)}</td><td>${esc(Number(p.time).toFixed(3))}</td><td>${esc(p.process || '-')}</td><td>${esc(p.srcName || p.src || '-')}</td><td>${esc(p.dstName || p.dst || '-')}</td><td>${esc(p.protocol)}</td><td>${esc(p.len)}</td><td class="cap-info">${esc(p.info)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty-cell">No packets match this filter.</td></tr>';
 }
+function packetLayerDetails(p) {
+  const groups = [
+    ['Frame', [['Protocol stack', p.frameProtocols], ['Captured length', p.capturedLength && `${p.capturedLength} bytes`]]],
+    ['Ethernet', [['Source MAC', p.ethSrc], ['Destination MAC', p.ethDst], ['EtherType', p.ethType]]],
+    ['IP', [['IPv4 TTL', p.ttl], ['IPv4 protocol', p.ipProto], ['IPv4 identification', p.ipId], ['IPv4 flags', p.ipFlags], ['IPv4 checksum', p.ipChecksum], ['IPv6 next header', p.ipv6Next], ['IPv6 payload length', p.ipv6Length], ['IPv6 hop limit', p.ipv6HopLimit]]],
+    ['TCP', [['Sequence number', p.tcpSequence], ['Acknowledgment number', p.tcpAck], ['Header length', p.tcpHeaderLength && `${p.tcpHeaderLength} bytes`], ['Data length', p.tcpPayloadLength && `${p.tcpPayloadLength} bytes`], ['Flags', p.tcpFlags], ['Window size', p.tcpWindow], ['Checksum', p.tcpChecksum], ['Retransmission', p.tcpRetransmission && 'TShark marked this packet as a retransmission']]],
+    ['UDP', [['Datagram length', p.udpLength && `${p.udpLength} bytes`], ['Checksum', p.udpChecksum]]],
+    ['DNS', [['Transaction ID', p.dnsId], ['Flags', p.dnsFlags], ['Query type', p.dnsQueryType], ['Answer name', p.dnsAnswerName], ['Answer TTL', p.dnsTtl], ['IPv4 answers', p.dnsA], ['IPv6 answers', p.dnsAAAA]]],
+    ['TLS', [['Record content type', p.tlsContentType], ['Record length', p.tlsRecordLength && `${p.tlsRecordLength} bytes`], ['Record version', p.tlsVersion], ['Handshake type', p.tlsHandshakeType], ['Handshake version', p.tlsHandshakeVersion], ['Cipher suite', p.tlsCipherSuite], ['Server name', p.tlsSNI]]],
+  ];
+  const visible = groups.map(([name, fields]) => [name, fields.filter(([, value]) => value)]).filter(([, fields]) => fields.length);
+  if (!visible.length) return '';
+  return `<section class="packet-deep"><h3>Decoded protocol fields</h3><p>These are fields TShark dissected from this packet's headers. Packet contents and raw bytes are not shown here.</p>${visible.map(([name, fields]) => `<details class="packet-layer"><summary>${esc(name)} <span>${fields.length} fields</span></summary><dl>${fields.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></details>`).join('')}</section>`;
+}
 function showPacket(i) {
   const p = capPackets[i];
   if (!p) return;
   cap.rows.querySelectorAll('tr').forEach((tr) => tr.classList.toggle('selected', tr.dataset.i === String(i)));
   const rows = [['Frame', p.frame], ['Time', `${p.time} s`], ['Length', `${p.len} bytes`], ['Process', p.process || 'Not matched to an open connection'], ['Source', `${p.src || '-'}${p.sport ? ':' + p.sport : ''}${p.srcName ? ' (' + p.srcName + ')' : ''}`], ['Destination', `${p.dst || '-'}${p.dport ? ':' + p.dport : ''}${p.dstName ? ' (' + p.dstName + ')' : ''}`], ['Protocol', p.protocol], ['DNS question', p.dnsQry], ['TLS server name', p.tlsSNI], ['HTTP host', p.httpHost], ['Info', p.info]];
-  cap.detail.innerHTML = `<div class="inspector-grid">${rows.filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>`;
+  cap.detail.innerHTML = `<div class="inspector-grid">${rows.filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>${packetLayerDetails(p)}<p class="packet-limit-note">Process is a best-effort match by local port, not a kernel-level packet attribution. TShark can dissect only what this interface observed. TLS application data remains encrypted; port 443 alone does not prove TLS.</p>`;
 }
 async function loadInterfaces() {
   try {
@@ -245,14 +329,15 @@ async function pollCapture() {
 }
 cap.start.addEventListener('click', () => {
   if (!cap.iface.value) return;
-  cap.dialogText.textContent = `This reads packet headers on ${cap.iface.selectedOptions[0].textContent} for ${cap.dur.value} seconds. They stay only in this app's memory, nothing is saved to disk and nothing is sent anywhere.`;
+  const expression = cap.displayFilter.value.trim();
+  cap.dialogText.textContent = `This reads packet headers on ${cap.iface.selectedOptions[0].textContent} for ${cap.dur.value} seconds${expression ? ` using the display filter “${expression}”` : ''}. Matching decoded fields stay only in this app's memory; nothing is saved to disk and nothing is sent anywhere. The filter limits displayed results; it does not prevent the interface from seeing other packets during this short capture.`;
   cap.dialog.showModal();
 });
 cap.dialog.addEventListener('close', async () => {
   if (cap.dialog.returnValue !== 'ok') return;
   cap.start.disabled = true;
   cap.status.textContent = 'Starting…';
-  const res = await fetch('/api/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ interface: cap.iface.value, seconds: Number(cap.dur.value), confirm: true }) });
+  const res = await fetch('/api/capture', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ interface: cap.iface.value, seconds: Number(cap.dur.value), displayFilter: cap.displayFilter.value.trim(), confirm: true }) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     cap.status.textContent = data.error || 'Capture could not start';
@@ -269,6 +354,11 @@ cap.clear.addEventListener('click', async () => {
   cap.detail.innerHTML = '<div class="inspector-empty">Start a capture, then select a packet to see all of its fields.</div>';
   renderCapture();
 });
+window.addEventListener('pagehide', () => {
+  if (capPoll) clearInterval(capPoll);
+  // Drop the in-memory capture and stop TShark when this local page closes.
+  fetch('/api/capture', { method: 'DELETE', keepalive: true }).catch(() => {});
+});
 cap.filter.addEventListener('input', () => renderCapture());
 cap.rows.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); });
 cap.rows.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const tr = e.target.closest('tr[data-i]'); if (tr) showPacket(Number(tr.dataset.i)); } });
@@ -282,6 +372,7 @@ const mapScope = document.querySelector('#map-scope');
 const names = new Map();
 const PORTS = { 443: 'HTTPS', 80: 'HTTP', 53: 'DNS', 853: 'DNS over TLS', 993: 'IMAP mail', 587: 'SMTP mail', 22: 'SSH', 5223: 'Apple push', 123: 'Time sync', 3478: 'Calls and video' };
 let mapModel = { apps: [], dests: [], links: [] };
+let selectedMapSelection = null;
 
 function hostOf(endpoint) {
   const s = String(endpoint || '');
@@ -359,6 +450,19 @@ function cut(text, n) {
   const s = String(text);
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
+function applyMapSelection() {
+  if (!selectedMapSelection) return;
+  const { app, ip } = selectedMapSelection;
+  mapSvg.querySelectorAll('.map-line').forEach((path) => {
+    const [lineApp, lineIp] = path.dataset.key.split('|');
+    const match = (!app || lineApp === app) && (!ip || lineIp === ip);
+    path.classList.toggle('dim', !match);
+    path.classList.toggle('selected', match);
+  });
+  mapSvg.querySelectorAll('.map-node').forEach((node) => {
+    node.classList.toggle('selected', (app && node.dataset.app === app) || (ip && node.dataset.ip === ip));
+  });
+}
 function renderMap() {
   if (!document.querySelector('#map').classList.contains('active-view')) return;
   mapModel = buildMap();
@@ -383,28 +487,28 @@ function renderMap() {
     const y2 = yDest(dests.indexOf(l.ip));
     const v = useBytes ? l.bytes : l.count;
     const w = 1.2 + 6 * Math.sqrt(v / maxW);
-    const path = svgEl('path', { d: `M ${leftX + 8} ${y1} C ${leftX + 160} ${y1}, ${rightX - 160} ${y2}, ${rightX - 8} ${y2}`, 'stroke-width': w.toFixed(1), class: 'map-line', tabindex: 0, 'data-key': `${l.app}|${l.ip}` });
+    const d = `M ${leftX + 8} ${y1} C ${leftX + 160} ${y1}, ${rightX - 160} ${y2}, ${rightX - 8} ${y2}`;
+    const path = svgEl('path', { d, 'stroke-width': w.toFixed(1), class: 'map-line', tabindex: 0, role: 'button', 'aria-label': `${l.app} connection to ${destLabel(l.ip)}`, 'data-key': `${l.app}|${l.ip}` });
     path.append(svgEl('title', {}, `${l.app} to ${destLabel(l.ip)}: ${l.count} connection${l.count > 1 ? 's' : ''}`));
-    lineLayer.append(path);
+    lineLayer.append(path, svgEl('path', { d, class: 'map-hit', 'aria-hidden': 'true', 'data-key': `${l.app}|${l.ip}` }));
   }
   mapSvg.append(lineLayer);
   apps.forEach((a, i) => {
-    const g = svgEl('g', { class: 'map-node', tabindex: 0, 'data-app': a });
+    const g = svgEl('g', { class: 'map-node', tabindex: 0, role: 'button', 'aria-label': `Select ${a}`, 'data-app': a });
     g.append(svgEl('circle', { cx: leftX, cy: yApp(i), r: 5 }), svgEl('text', { x: leftX - 14, y: yApp(i) + 4, 'text-anchor': 'end' }, cut(a, 30)));
     mapSvg.append(g);
   });
   dests.forEach((ip, i) => {
-    const g = svgEl('g', { class: `map-node${isPrivate(ip) ? ' local' : ''}`, tabindex: 0, 'data-ip': ip });
+    const g = svgEl('g', { class: `map-node${isPrivate(ip) ? ' local' : ''}`, tabindex: 0, role: 'button', 'aria-label': `Select destination ${destLabel(ip)}`, 'data-ip': ip });
     g.append(svgEl('circle', { cx: rightX, cy: yDest(i), r: 5 }), svgEl('text', { x: rightX + 14, y: yDest(i) + 4 }, cut(destLabel(ip), 34)));
     mapSvg.append(g);
   });
+  applyMapSelection();
   lookupNames(dests);
 }
 function selectOnMap({ app, ip }) {
-  mapSvg.querySelectorAll('.map-line').forEach((p) => {
-    const [a, d] = p.dataset.key.split('|');
-    p.classList.toggle('dim', !((!app || a === app) && (!ip || d === ip)));
-  });
+  selectedMapSelection = { app: app || null, ip: ip || null };
+  applyMapSelection();
   const related = mapModel.links.filter((l) => (!app || l.app === app) && (!ip || l.ip === ip));
   const item = { kind: app && ip ? 'connection' : app ? 'app' : 'destination' };
   if (app) item.app = app;
@@ -418,7 +522,7 @@ function selectOnMap({ app, ip }) {
   if (bytes) item.bytes_in_last_capture = bytes;
   const rows = Object.entries(item).filter(([k, v]) => k !== 'kind' && v !== '' && v != null);
   const socketRows = app && ip ? activeRows.filter((r) => r.process === app && hostOf(r.remote) === ip).slice(0, 4) : [];
-  const socketHtml = socketRows.length ? `<div class="socket-diagram">${socketRows.map((r) => `<div class="socket-row"><span class="sock-end">${esc(r.process)}<small>${esc(r.local)}</small></span><span class="sock-pipe">${esc(r.protocol)} · ${esc(r.state)}</span><span class="sock-end">${esc(destLabel(ip))}<small>${esc(r.remote)}</small></span></div>`).join('')}<p class="learn-note"><b>Socket</b> is one end of a conversation: an IP address plus a port. A connection is a pair of sockets. macOS knows which app owns the local socket, which is how this map knows who talks to whom.</p></div>` : '';
+  const socketHtml = socketRows.length ? `<div class="socket-diagram">${socketRows.map((r) => `<div class="socket-row"><span class="sock-end">${esc(r.process)}<small>${esc(r.local)}</small></span><span class="sock-pipe">${esc(r.protocol)} · ${esc(r.state)}</span><span class="sock-end">${esc(destLabel(ip))}<small>${esc(r.remote)}</small></span></div>`).join('')}<p class="learn-note"><b>What is a socket?</b> macOS creates a communication endpoint in its kernel and gives the app a file-descriptor handle to it. Once connected, the flow can be described by its protocol and the local and remote IP-address/port pairs shown above. The handle itself is not an IP address.</p></div>` : '';
   const judge = ip && !isPrivate(ip) ? `<div class="judge"><b>How to judge an address</b><ul><li>Who owns it: <span class="owner-line">looking up…</span></li><li>Does the owner fit the app? A password manager talking to Amazon CloudFront is normal; a calculator talking to an unknown host abroad is not.</li><li>Port 443 is ordinary encrypted web traffic. Unusual ports deserve a second look.</li><li>New, at night, or from an app that never went online before: worth a check, not proof of harm.</li></ul><small>Owner lookup asks the public internet registry (whois) about this address.</small></div>` : '';
   mapDetail.innerHTML = `<div class="inspector-grid">${rows.map(([k, v]) => `<div><span>${esc(k.replace(/_/g, ' '))}</span><strong>${esc(v)}</strong></div>`).join('')}</div>${socketHtml}${judge}${explainBlock()}`;
   bindExplain(mapDetail, item);
@@ -456,12 +560,12 @@ function bindExplain(container, item) {
   });
 }
 mapSvg.addEventListener('click', (e) => {
-  const line = e.target.closest('.map-line');
-  if (line) { const [app, ip] = line.dataset.key.split('|'); selectOnMap({ app, ip }); return; }
+  const line = e.target.closest('.map-line, .map-hit');
+  if (line) { const [app, ip] = line.dataset.key.split('|'); selectOnMap({ app, ip }); mapDetail.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
   const node = e.target.closest('.map-node');
-  if (node) selectOnMap(node.dataset.app ? { app: node.dataset.app } : { ip: node.dataset.ip });
+  if (node) { selectOnMap(node.dataset.app ? { app: node.dataset.app } : { ip: node.dataset.ip }); mapDetail.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
 });
-mapSvg.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+mapSvg.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); } });
 mapScope.addEventListener('change', () => renderMap());
 document.querySelector('a[href="#map"]').addEventListener('click', () => setTimeout(() => renderMap(), 0));
 setInterval(() => renderMap(), 3000);
@@ -516,6 +620,7 @@ async function loadMarkers() {
     if (info) info.textContent = `${data.apps} apps learned · stored only on this Mac in ${data.file}`;
     renderAttention();
     renderMap();
+    window.dispatchEvent(new CustomEvent('markers-updated'));
   } catch { /* markers are optional */ }
 }
 function renderAttention() {
