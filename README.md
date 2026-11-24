@@ -20,6 +20,14 @@ cargo run --release
 
 Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to use another local port.
 
+### As a Dock app
+
+```sh
+./scripts/macos/install-app.sh --dock
+```
+
+This builds the release binary and installs `~/Applications/Local Network Watcher.app` with the binary inside it. The app starts the server if it is not running and opens the page in a Brave app window, or in the default browser. The server keeps running after the window closes; the log is `~/Library/Logs/LocalNetworkWatcher.log`. `--dock` adds the app to the Dock once. Rerun the script after pulling changes.
+
 ## What it observes
 
 - Connection snapshots are refreshed every three seconds from `lsof`; process byte and packet totals come from `nettop` and are not attributed to individual sockets. The optional process inventory is assembled from `ps` and `nettop`; the checkbox can include zero-valued processes visible in that snapshot. This is not guaranteed to equal every row Activity Monitor can show. The connection map remains limited to observed open remote sockets.
