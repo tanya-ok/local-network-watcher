@@ -1,4 +1,4 @@
-# Local Network Watch
+# Local Network Watcher
 
 A local, read-only monitor for current network connections on macOS. The app polls `lsof` on this device and shows the process, local endpoint, remote endpoint, protocol, and socket state. It does not capture packet contents, count bytes, resolve hostnames, persist logs, or change firewall rules.
 

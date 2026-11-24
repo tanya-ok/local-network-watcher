@@ -326,4 +326,4 @@ setInterval(sample, 15000);
 sample();
 
 const port = Number(process.env.PORT || 4317);
-server.listen(port, '127.0.0.1', () => console.log(`Local Network Watch is listening at http://127.0.0.1:${port}`));
+server.listen(port, '127.0.0.1', () => console.log(`Local Network Watcher is listening at http://127.0.0.1:${port}`));

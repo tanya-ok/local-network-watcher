@@ -1,9 +1,13 @@
 {
-  "name": "local-network-watch",
+  "name": "local-network-watcher",
   "version": "0.1.0",
   "private": true,
   "description": "A local, read-only view of active network connections on this Mac.",
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.js" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
 }
