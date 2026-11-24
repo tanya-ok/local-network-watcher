@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f0e6">
+  <title>Local Watch — Network activity</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Main navigation">
+      <a class="brand" href="#activity" aria-label="Local Watch home"><span class="brand-mark">↗</span><span>Local<br>Watch</span></a>
+      <nav class="nav-list">
+        <a class="nav-item active" href="#activity" aria-current="page"><span class="nav-icon">◌</span>Activity</a>
+        <a class="nav-item" href="#processes"><span class="nav-icon">⌘</span>Processes</a>
+        <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
+        <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
+      </nav>
+      <div class="rail-note">ON THIS MAC<br><span>Private by design</span></div>
+    </aside>
+    <main class="content">
+      <header class="topline"><div><span class="eyebrow">Local network monitor</span><h1>Where things go</h1><p class="intro">A live view of connections open on this Mac.</p></div><div class="live-state"><span class="live-dot"></span><span id="live-label">Connecting…</span></div></header>
+      <section class="summary" aria-label="Current snapshot"><div class="summary-number"><strong id="connection-count">—</strong><span>open connections</span></div><div class="summary-number secondary-number"><strong id="process-count">—</strong><span>active processes</span></div><div class="summary-copy"><span id="sample-state">Reading from this device</span><small id="live-rate">Waiting for first speed sample</small><small id="last-updated">Waiting for first snapshot</small></div><button id="refresh" class="text-button" type="button">Refresh now</button></section>
+      <section id="activity" class="view active-view" aria-labelledby="activity-heading">
+        <div class="section-bar"><div><h2 id="activity-heading">Connection map</h2><p>Open paths from apps on this Mac to remote addresses.</p></div><label class="filter-label" for="filter">Show <select id="filter"><option value="all">All connections</option><option value="new">First seen this session</option></select></label></div>
+        <div class="table-head"><span>Process</span><span>Route</span><span>Remote address</span><span>State</span></div>
+        <div id="connection-list" class="connection-list" aria-live="polite"><div class="loading-state">Looking for open connections…</div></div>
+        <div id="flow-inspector" class="flow-inspector"><div class="inspector-empty">Select a path to inspect its process, protocol, local port and process-level traffic totals.</div></div><div class="footnote"><span class="legend-line"></span>Each line is a live socket route. Packet-level details will appear in a separate capture view.</div>
+      </section>
+      <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><p class="metrics-note">Byte and packet totals are process-level counts since launch. The live rate is calculated from consecutive system snapshots; it is not assigned to one specific connection.</p></section>
+      <section id="events" class="view" aria-labelledby="events-heading"><div class="section-bar"><div><h2 id="events-heading">Recent events</h2><p>Connection changes observed while this page is open.</p></div><button class="text-button" id="clear-events" type="button">Clear history</button></div><div id="event-list" class="event-list"></div></section>
+      <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span>Current page only · nothing saved</span></div><div><strong>Packet inspection</strong><span>Capture engine is a later milestone</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture needs an explicitly started local capture engine. Blocking and isolation need a separate macOS Network Extension.</p></section>
+      <footer class="page-foot"><span>Local Watch</span><span id="source-note">Runs on this Mac · no packet capture</span></footer>
+    </main>
+  </div>
+</body>
+</html>
