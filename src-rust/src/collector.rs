@@ -1,0 +1,298 @@
+//! Reads open sockets (lsof) and per-process traffic (nettop) on macOS.
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Default, Clone)]
+struct Socket {
+    pid: u32,
+    process: String,
+    protocol: String,
+    name: String,
+    state: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct Connection {
+    pub pid: u32,
+    pub process: String,
+    pub protocol: String,
+    pub local: String,
+    pub remote: String,
+    pub state: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTraffic {
+    pub pid: u32,
+    pub process: String,
+    pub user: String,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
+    pub received_packets: u64,
+    pub sent_packets: u64,
+}
+
+fn is_loopback(endpoint: &str) -> bool {
+    let Some(split) = endpoint.rfind(':') else {
+        return false;
+    };
+    let host = endpoint[..split].trim_matches(['[', ']']);
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+fn flush_socket(socket: &Socket, rows: &mut Vec<Connection>) {
+    if socket.name.is_empty() || socket.state == "LISTEN" || socket.state == "CLOSED" {
+        return;
+    }
+    let Some(split) = socket.name.rfind("->") else {
+        return;
+    };
+    let local = &socket.name[..split];
+    let remote = &socket.name[split + 2..];
+    if remote.is_empty() || remote == "*" || remote == "*:*" || is_loopback(remote) {
+        return;
+    }
+    rows.push(Connection {
+        pid: socket.pid,
+        process: if socket.process.is_empty() {
+            "Unknown process".into()
+        } else {
+            socket.process.clone()
+        },
+        protocol: socket.protocol.trim_start_matches('P').to_string(),
+        local: local.to_string(),
+        remote: remote.to_string(),
+        state: if socket.state.is_empty() {
+            "Open".into()
+        } else {
+            socket.state.clone()
+        },
+    });
+}
+
+fn parse_lsof(text: &str) -> Vec<Connection> {
+    let mut rows = Vec::new();
+    let mut socket: Option<Socket> = None;
+    for line in text.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            if let Some(current) = &socket {
+                flush_socket(current, &mut rows);
+            }
+            socket = Some(Socket {
+                pid: pid.parse().unwrap_or_default(),
+                ..Socket::default()
+            });
+        } else if let Some(current) = socket.as_mut() {
+            if let Some(process) = line.strip_prefix('c') {
+                current.process = process.to_string();
+            } else if line.starts_with('f') {
+                flush_socket(current, &mut rows);
+                current.name.clear();
+                current.state.clear();
+            } else if let Some(protocol) = line.strip_prefix('P') {
+                current.protocol = protocol.to_string();
+            } else if let Some(name) = line.strip_prefix('n') {
+                current.name = name.to_string();
+            } else if let Some(state) = line.strip_prefix("TST=") {
+                current.state = state.to_string();
+            }
+        }
+    }
+    if let Some(current) = &socket {
+        flush_socket(current, &mut rows);
+    }
+    rows.sort_by(|a, b| a.process.cmp(&b.process).then(a.remote.cmp(&b.remote)));
+    rows.dedup_by(|a, b| {
+        a.pid == b.pid
+            && a.protocol == b.protocol
+            && a.local == b.local
+            && a.remote == b.remote
+            && a.state == b.state
+    });
+    rows.truncate(500);
+    rows
+}
+
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field)),
+            _ => field.push(ch),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
+fn process_names() -> HashMap<u32, (String, String)> {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-Aww", "-o", "pid=,user=,comm="])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim().split_once(char::is_whitespace)?;
+            let pid = pid.parse::<u32>().ok()?;
+            // user first, then the full command path, which may contain spaces
+            let (user, command) = rest.trim().split_once(char::is_whitespace)?;
+            let name = command.trim().rsplit('/').next()?.to_string();
+            Some((pid, (name, user.trim().to_string())))
+        })
+        .collect()
+}
+
+fn parse_nettop(text: &str, names: &HashMap<u32, (String, String)>) -> Vec<ProcessTraffic> {
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let fields = csv_fields(line);
+        if fields.first().is_some_and(|field| field.trim().is_empty()) {
+            header = fields;
+            continue;
+        }
+        if header.is_empty() || fields.is_empty() {
+            continue;
+        }
+        let Some((raw_name, pid)) = fields[0].trim().rsplit_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        let value = |column: &str| -> u64 {
+            header
+                .iter()
+                .position(|name| name == column)
+                .and_then(|index| fields.get(index))
+                .and_then(|field| field.trim().parse().ok())
+                .unwrap_or_default()
+        };
+        let process = names
+            .get(&pid)
+            .map(|details| details.0.clone())
+            .unwrap_or_else(|| raw_name.trim_end_matches('.').to_string());
+        let user = names
+            .get(&pid)
+            .map(|details| details.1.clone())
+            .unwrap_or_default();
+        rows.push(ProcessTraffic {
+            pid,
+            process,
+            user,
+            received_bytes: value("bytes_in"),
+            sent_bytes: value("bytes_out"),
+            received_packets: value("packets_in"),
+            sent_packets: value("packets_out"),
+        });
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(row.received_bytes + row.sent_bytes));
+    rows.dedup_by_key(|row| row.pid);
+    rows
+}
+
+fn all_processes(
+    names: &HashMap<u32, (String, String)>,
+    traffic: &[ProcessTraffic],
+) -> Vec<ProcessTraffic> {
+    let traffic_by_pid: HashMap<u32, &ProcessTraffic> =
+        traffic.iter().map(|row| (row.pid, row)).collect();
+    let mut rows = names
+        .iter()
+        .map(|(pid, (process, user))| {
+            traffic_by_pid.get(pid).map_or_else(
+                || ProcessTraffic {
+                    pid: *pid,
+                    process: process.clone(),
+                    user: user.clone(),
+                    received_bytes: 0,
+                    sent_bytes: 0,
+                    received_packets: 0,
+                    sent_packets: 0,
+                },
+                |row| (**row).clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        (b.received_bytes + b.sent_bytes)
+            .cmp(&(a.received_bytes + a.sent_bytes))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+    rows
+}
+
+fn run(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|_| format!("Could not run {program}."))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub sampled_at: u128,
+    pub source: &'static str,
+    pub refresh_seconds: u32,
+    pub connections: Vec<Connection>,
+    pub processes: Vec<ProcessTraffic>,
+    pub all_processes: Vec<ProcessTraffic>,
+    pub metrics_warning: Option<String>,
+}
+
+/// One blocking sample: lsof for sockets, nettop for traffic. Call from a blocking thread.
+pub fn snapshot() -> Result<Snapshot, String> {
+    let names = process_names();
+    let connections = run("/usr/sbin/lsof", &["-nP", "-i", "-FpcPTn"])
+        .map(|text| parse_lsof(&text))
+        .map_err(|error| format!("Could not read open network connections: {error}"))?;
+    let (processes, metrics_warning) = match run(
+        "/usr/bin/nettop",
+        &[
+            "-P",
+            "-L",
+            "1",
+            "-n",
+            "-x",
+            "-J",
+            "packets_in,bytes_in,packets_out,bytes_out",
+        ],
+    ) {
+        Ok(text) => (parse_nettop(&text, &names), None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let all_processes = all_processes(&names, &processes);
+    let sampled_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Ok(Snapshot {
+        sampled_at,
+        source: "macOS nettop + lsof \u{b7} Rust core",
+        refresh_seconds: 3,
+        connections,
+        processes,
+        all_processes,
+        metrics_warning,
+    })
+}

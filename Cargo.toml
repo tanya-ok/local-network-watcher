@@ -1,8 +1,24 @@
 [package]
-name = "netwatch-core"
-version = "0.1.0"
+name = "local-network-watcher"
+version = "0.2.0"
 edition = "2024"
+license = "MIT"
+description = "A local-first macOS network observatory"
+publish = false
 
 [[bin]]
-name = "netwatch-core"
+name = "local-network-watcher"
 path = "src-rust/src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "net", "sync", "io-util", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json"] }
+dns-lookup = "2"
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = "thin"
