@@ -31,6 +31,9 @@ fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleName Local Network Watcher" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string io.github.tanya-ok.local-network-watcher" "$APP/Contents/Info.plist" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier io.github.tanya-ok.local-network-watcher" "$APP/Contents/Info.plist"
+# osacompile ships Assets.car with the default script icon, which wins over applet.icns.
+/bin/rm -f "$APP/Contents/Resources/Assets.car"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" 2>/dev/null || true
 /usr/bin/codesign --force --deep --sign - "$APP"
 /usr/bin/touch "$APP"
 
