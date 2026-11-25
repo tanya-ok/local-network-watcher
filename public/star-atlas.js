@@ -5,6 +5,7 @@ const atlasHomeForm = document.querySelector('#atlas-home');
 const atlasW = 900, atlasH = 440, atlasCx = 450, atlasCy = 220, atlasR = 148;
 let atlasData = null;
 let atlasBusy = false;
+let atlasEstimate = null;
 
 const atlasEsc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const atlasHash = (s) => { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
@@ -14,7 +15,8 @@ function atlasHome() {
     const v = JSON.parse(localStorage.getItem('local-watch-atlas-home') || 'null');
     if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon)) return v;
   } catch { /* Default home is used. */ }
-  // No IP lookup: longitude is estimated from the time zone offset only.
+  if (atlasEstimate?.lat != null) return { lat: atlasEstimate.lat, lon: atlasEstimate.lon, unset: true, city: atlasEstimate.city };
+  // Last resort: longitude from the time zone offset only.
   const lon = Math.max(-180, Math.min(180, (-new Date().getTimezoneOffset() / 60) * 15));
   return { lat: 30, lon, unset: true };
 }
@@ -104,7 +106,7 @@ function renderAtlas() {
     return '';
   }).join('');
   const ring = geoOk ? '' : `<ellipse class="atlas-ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" rx="${110 * 1.6}" ry="110"/>`;
-  atlasSvg.innerHTML = `${graticule(lon0)}${ring}<g class="atlas-arcs">${arcs}</g>${dots}<circle class="atlas-home" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="5"/><text class="atlas-label atlas-home-label" x="${(hx + 9).toFixed(1)}" y="${(hy - 6).toFixed(1)}">home${home.unset ? ' (time zone estimate)' : ''}</text>${text}`;
+  atlasSvg.innerHTML = `${graticule(lon0)}${ring}<g class="atlas-arcs">${arcs}</g>${dots}<circle class="atlas-home" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="5"/><text class="atlas-label atlas-home-label" x="${(hx + 9).toFixed(1)}" y="${(hy - 6).toFixed(1)}">home${home.unset ? ` (${atlasEsc(home.city || 'time zone')}, from time zone)` : ''}</text>${text}`;
   const procs = new Map();
   for (const p of points) for (const name of p.processes) procs.set(name, (procs.get(name) || 0) + 1);
   atlasKey.innerHTML = [...procs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name, n]) => `<span><i style="background:${processColor(name)}"></i>${atlasEsc(name)} <small>${n}</small></span>`).join('') || '<span>No remote destinations right now.</span>';
@@ -120,6 +122,7 @@ async function loadAtlas() {
   if (atlasBusy || !document.querySelector('#star-atlas')?.classList.contains('active-view')) return;
   atlasBusy = true;
   try {
+    if (!atlasEstimate) { try { atlasEstimate = await (await fetch('/api/home-estimate', { cache: 'no-store' })).json(); } catch { atlasEstimate = {}; } }
     const res = await fetch('/api/atlas', { cache: 'no-store' });
     atlasData = await res.json();
     renderAtlas();

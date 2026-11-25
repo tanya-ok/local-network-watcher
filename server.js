@@ -59,6 +59,20 @@ function saveSettings() {
   mkdirSync(SETTINGS_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings), { mode: 0o600 });
 }
+// Home estimate from the Mac's time zone and the system zone.tab; nothing is looked up online.
+async function homeFromTimeZone() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  try {
+    const tab = await readFile('/usr/share/zoneinfo/zone.tab', 'utf8');
+    const row = tab.split('\n').find((l) => !l.startsWith('#') && l.split('\t')[2] === tz);
+    const m = row?.split('\t')[1].match(/^([+-])(\d{2})(\d{2})(\d{2})?([+-])(\d{3})(\d{2})(\d{2})?$/);
+    if (m) {
+      const deg = (sign, d, mi, se) => (sign === '-' ? -1 : 1) * (Number(d) + Number(mi) / 60 + Number(se || 0) / 3600);
+      return { tz, city: tz.split('/').pop().replace(/_/g, ' '), lat: +deg(m[1], m[2], m[3], m[4]).toFixed(2), lon: +deg(m[5], m[6], m[7], m[8]).toFixed(2), source: 'time zone' };
+    }
+  } catch { /* fall through */ }
+  return { tz, source: 'none' };
+}
 const nameCache = new Map();
 async function reverseName(ip) {
   if (!userSettings.reverseDns) return '';
@@ -229,6 +243,11 @@ const server = createServer(async (req, res) => {
     if (!enabled) { nameCache.clear(); atlasNames.clear(); }
     try { saveSettings(); } catch { /* setting still applies until restart */ }
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ reverseDns: enabled }));
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/home-estimate') {
+    const home = await homeFromTimeZone();
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(home));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/settings') {
