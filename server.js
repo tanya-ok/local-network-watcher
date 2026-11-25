@@ -14,6 +14,7 @@ import { exePath, trustFacts } from './trust.js';
 import { persistenceItems } from './persistence.js';
 import { changeJob } from './launchd-control.js';
 import { geoLookup, isNonPublic } from './geoip.js';
+import { changeRule, egressStatus, initEgress, setEnabled, setPaused } from './egress.js';
 
 const exec = promisify(execFile);
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -257,6 +258,28 @@ const server = createServer(async (req, res) => {
     let out;
     try { out = await changeJob(input.action, input.file); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); return; }
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(out));
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/egress') {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(egressStatus()));
+    return;
+  }
+  if (req.method === 'POST' && pathname.startsWith('/api/egress/')) {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    let input = {};
+    try { input = JSON.parse(body); } catch { /* invalid */ }
+    const fail = (message) => res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: message }));
+    try {
+      if (pathname === '/api/egress/enable' && typeof input.enabled === 'boolean') await setEnabled(input.enabled);
+      else if (pathname === '/api/egress/pause' && typeof input.paused === 'boolean') setPaused(input.paused);
+      else if (pathname === '/api/egress/rule' && ['allow', 'deny', 'remove'].includes(input.action)) changeRule(input.action, input.host);
+      else { fail('Unknown egress change.'); return; }
+    } catch (e) { fail(e.code === 'EADDRINUSE' ? 'The proxy port is already in use.' : e.message); return; }
+    await logAction({ type: 'egress', path: pathname, input }).catch(() => {});
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(egressStatus()));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/home-estimate') {
@@ -553,4 +576,5 @@ setInterval(sample, 15000);
 sample();
 
 const port = Number(process.env.PORT || 4317);
+initEgress().catch((e) => console.error(`Egress proxy did not start: ${e.message}`));
 server.listen(port, '127.0.0.1', () => console.log(`Local Network Watcher is listening at http://127.0.0.1:${port}`));

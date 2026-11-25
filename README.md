@@ -34,6 +34,7 @@ Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to u
   - Restart: only for launchd jobs found in `launchctl print gui/<uid>`, using `launchctl kickstart -k`. Unavailable for other processes, including GUI app instances registered by LaunchServices.
 - Every process action, including refusals, is appended as one JSON line to `actions.log` in the data folder (`LOCAL_WATCH_DATA` or `~/Library/Application Support/LocalWatch`), file mode 0600.
 - Process control does not block network access. Network isolation is not implemented.
+- **Egress** is an optional local proxy, off by default. It listens on loopback with two profiles: open (`127.0.0.1:4318`, everything passes except blocked domains) and strict (`127.0.0.1:4319`, only the allow list passes). Both always refuse a built-in list of hosted AI services and trackers, and refuse local network addresses. Each request is appended to `egress.log` in the data folder (host, port, result, reason, bytes), file mode 0600. Request contents are not read: HTTPS passes as an opaque tunnel. Only programs configured to use the proxy are covered; it does not force other traffic through itself.
 - This version does not enforce firewall rules or identify a connection as malicious.
 
 ## Capture
