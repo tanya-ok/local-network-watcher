@@ -14,7 +14,9 @@ function atlasHome() {
     const v = JSON.parse(localStorage.getItem('local-watch-atlas-home') || 'null');
     if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon)) return v;
   } catch { /* Default home is used. */ }
-  return { lat: 0, lon: 0, unset: true };
+  // No IP lookup: longitude is estimated from the time zone offset only.
+  const lon = Math.max(-180, Math.min(180, (-new Date().getTimezoneOffset() / 60) * 15));
+  return { lat: 30, lon, unset: true };
 }
 
 function mollweide(lat, lon, lon0) {
@@ -59,14 +61,14 @@ function renderAtlas() {
   const bytesOf = (d) => d.pids.reduce((s, pid) => { const p = stats.get(Number(pid)); return s + (p ? p.receivedBytes + p.sentBytes : 0); }, 0);
   const maxBytes = Math.max(1, ...atlasData.destinations.map(bytesOf));
   const flagged = new Set((typeof markers !== 'undefined' ? markers : []).filter((m) => m.kind === 'new-destination' && m.ip).map((m) => m.ip));
-  const points = atlasData.destinations.map((d) => {
+  const localCount = atlasData.destinations.filter((d) => d.local).length;
+  const points = atlasData.destinations.filter((d) => !d.local).map((d) => {
     let x, y, placed = 'geo';
     if (geoOk && d.lat != null) [x, y] = mollweide(d.lat, d.lon, lon0);
     else {
       const ang = (atlasHash(d.ip) % 360) * Math.PI / 180;
-      const rad = d.local ? 34 : 110;
-      x = hx + Math.cos(ang) * rad * 1.6; y = hy + Math.sin(ang) * rad;
-      placed = d.local ? 'local' : 'ring';
+      x = hx + Math.cos(ang) * 176; y = hy + Math.sin(ang) * 110;
+      placed = 'ring';
     }
     const r = 2.5 + 8 * Math.sqrt(bytesOf(d) / maxBytes);
     return { ...d, x, y, r, placed, color: processColor(d.processes[0]), fresh: flagged.has(d.ip) };
@@ -74,7 +76,7 @@ function renderAtlas() {
   const many = points.length > 25;
   const labels = new Map();
   for (const p of points) {
-    const key = many ? (p.domain || (p.local ? 'local network' : p.ip)) : p.ip;
+    const key = many ? (p.domain || p.ip) : p.ip;
     const g = labels.get(key) || { key, hosts: 0, best: p, fresh: false };
     g.hosts++; if (p.r > g.best.r) g.best = p; g.fresh ||= p.fresh;
     labels.set(key, g);
@@ -84,19 +86,25 @@ function renderAtlas() {
     return `<path class="atlas-arc${p.placed !== 'geo' ? ' atlas-arc-unknown' : ''}" stroke="${p.color}" d="M${hx.toFixed(1)} ${hy.toFixed(1)}Q${mx.toFixed(1)} ${my.toFixed(1)} ${p.x.toFixed(1)} ${p.y.toFixed(1)}"/>`;
   }).join('');
   const dots = points.map((p) => `<g class="atlas-star${p.fresh ? ' atlas-new' : ''}" data-ip="${atlasEsc(p.ip)}" data-app="${atlasEsc(p.processes[0])}" tabindex="0" role="button" aria-label="${atlasEsc(`${p.name || p.ip}, ${p.processes.join(', ')}${p.city ? `, ${p.city}` : ''}${p.country ? ` ${p.country}` : ''}`)}"><title>${atlasEsc(`${p.name || p.ip}\n${p.processes.join(', ')}\n${p.city ? `${p.city}, ` : ''}${p.country || (p.local ? 'Local network, no location' : 'No location')}`)}</title>${p.fresh ? `<circle class="atlas-halo" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${(p.r + 5).toFixed(1)}"/>` : ''}<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${p.r.toFixed(1)}" fill="${p.color}"/></g>`).join('');
-  const taken = [];
-  const text = [...labels.values()].sort((a, b) => b.best.r - a.best.r).filter((g) => {
+  // Labels are placed right, left, above or below the star; a label that fits nowhere is left to the tooltip.
+  const boxes = [[hx - 4, hy - 18, hx + 80, hy + 2], ...points.map((p) => [p.x - p.r, p.y - p.r, p.x + p.r, p.y + p.r])];
+  const hit = (b) => b[0] < 0 || b[2] > atlasW || b[1] < 0 || b[3] > atlasH || boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]);
+  const text = [...labels.values()].sort((a, b) => b.best.r - a.best.r).slice(0, 30).map((g) => {
     const p = g.best;
-    if (taken.some(([x, y]) => Math.abs(x - p.x) < 110 && Math.abs(y - p.y) < 12)) return false;
-    taken.push([p.x, p.y]);
-    return true;
-  }).slice(0, 30).map((g) => {
-    const p = g.best;
-    const name = many ? `${g.key}${g.hosts > 1 ? ` (${g.hosts} hosts)` : ''}` : (p.domain || p.ip);
-    return `<text class="atlas-label${g.fresh ? ' atlas-label-new' : ''}" x="${(p.x + p.r + 4).toFixed(1)}" y="${(p.y + 3).toFixed(1)}">${atlasEsc(name)}${g.fresh ? ' new' : ''}</text>`;
+    const name = `${many ? `${g.key}${g.hosts > 1 ? ` (${g.hosts} hosts)` : ''}` : (p.domain || p.ip)}${g.fresh ? ' new' : ''}`;
+    const w = name.length * 6.6, h = 12, gap = p.r + 4;
+    const spots = [[p.x + gap, p.y + 4, 'start'], [p.x - gap, p.y + 4, 'end'], [p.x, p.y - gap - 2, 'middle'], [p.x, p.y + gap + 10, 'middle']];
+    for (const [x, y, anchor] of spots) {
+      const x0 = anchor === 'start' ? x : anchor === 'end' ? x - w : x - w / 2;
+      const box = [x0 - 2, y - h + 2, x0 + w + 2, y + 3];
+      if (hit(box)) continue;
+      boxes.push(box);
+      return `<text class="atlas-label${g.fresh ? ' atlas-label-new' : ''}" text-anchor="${anchor}" x="${x.toFixed(1)}" y="${y.toFixed(1)}">${atlasEsc(name)}</text>`;
+    }
+    return '';
   }).join('');
   const ring = geoOk ? '' : `<ellipse class="atlas-ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" rx="${110 * 1.6}" ry="110"/>`;
-  atlasSvg.innerHTML = `${graticule(lon0)}${ring}<g class="atlas-arcs">${arcs}</g>${dots}<circle class="atlas-home" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="5"/><text class="atlas-label atlas-home-label" x="${(hx + 9).toFixed(1)}" y="${(hy - 6).toFixed(1)}">home${home.unset ? ' (not set)' : ''}</text>${text}`;
+  atlasSvg.innerHTML = `${graticule(lon0)}${ring}<g class="atlas-arcs">${arcs}</g>${dots}<circle class="atlas-home" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="5"/><text class="atlas-label atlas-home-label" x="${(hx + 9).toFixed(1)}" y="${(hy - 6).toFixed(1)}">home${home.unset ? ' (time zone estimate)' : ''}</text>${text}`;
   const procs = new Map();
   for (const p of points) for (const name of p.processes) procs.set(name, (procs.get(name) || 0) + 1);
   atlasKey.innerHTML = [...procs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([name, n]) => `<span><i style="background:${processColor(name)}"></i>${atlasEsc(name)} <small>${n}</small></span>`).join('') || '<span>No remote destinations right now.</span>';
@@ -105,7 +113,7 @@ function renderAtlas() {
     ? 'No GeoIP file, so destinations sit on a ring around home. To place them, download the free db-ip City Lite mmdb and put it at <code>~/Library/Application Support/LocalWatch/geoip/dbip-city-lite.mmdb</code> (see README).'
     : atlasData.geoip === 'error' ? atlasEsc(atlasData.geoipError || 'The GeoIP file could not be read.')
     : atlasData.error ? atlasEsc(atlasData.error)
-    : `${points.length} destinations · ${points.filter((p) => p.placed === 'local').length} on the local network (no location) · ${unplaced} without a location. Locations are city-level estimates.`;
+    : `${points.length} remote destinations · ${localCount} on the local network (not drawn) · ${unplaced} without a location. Locations are city-level estimates.`;
 }
 
 async function loadAtlas() {

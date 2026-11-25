@@ -13,7 +13,7 @@
 .atlas-star:focus{outline:none}
 .atlas-halo{fill:none;stroke:var(--rust);stroke-width:1.5;opacity:1}
 .atlas-home{fill:var(--ink)}
-.atlas-label{fill:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none}
+.atlas-label{fill:var(--muted);paint-order:stroke;stroke:var(--paper);stroke-width:3px;stroke-linejoin:round;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none}
 .atlas-label-new{fill:var(--rust)}
 .atlas-key{display:flex;flex-wrap:wrap;gap:6px 16px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
 .atlas-key i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
