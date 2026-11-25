@@ -10,6 +10,7 @@ import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } f
 import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 import { exePath, trustFacts } from './trust.js';
 import { persistenceItems } from './persistence.js';
+import { geoLookup, isNonPublic } from './geoip.js';
 
 const exec = promisify(execFile);
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -140,6 +141,39 @@ async function activeConnections() {
   }
 }
 
+const atlasNames = new Map();
+async function atlasName(ip) {
+  if (atlasNames.has(ip)) return atlasNames.get(ip);
+  let name = '';
+  try { name = (await Promise.race([reverse(ip), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 800))]))[0] || ''; } catch {}
+  atlasNames.set(ip, name);
+  if (atlasNames.size > 2000) atlasNames.delete(atlasNames.keys().next().value);
+  return name;
+}
+const hostOfRemote = (remote) => { const s = String(remote || ''); const m = s.match(/^\[([^\]]+)\]/); if (m) return m[1]; const i = s.lastIndexOf(':'); return s.indexOf(':') === i && i > 0 ? s.slice(0, i) : s; };
+const domainOf = (name) => { const parts = name.replace(/\.$/, '').split('.'); return parts.length > 2 ? parts.slice(-2).join('.') : parts.join('.'); };
+
+async function atlasData() {
+  const snapshot = await activeConnections();
+  const byIp = new Map();
+  for (const row of snapshot.connections || []) {
+    const ip = hostOfRemote(row.remote);
+    if (!isIP(ip)) continue;
+    const d = byIp.get(ip) || { ip, processes: new Set(), pids: new Set(), ports: new Set(), count: 0 };
+    d.processes.add(row.process); d.pids.add(row.pid); d.ports.add(String(row.remote).split(':').pop()); d.count++;
+    byIp.set(ip, d);
+  }
+  const ips = [...byIp.keys()];
+  const geo = await geoLookup(ips);
+  const names = await Promise.all(ips.map((ip) => (isNonPublic(ip) ? '' : atlasName(ip))));
+  const destinations = ips.map((ip, i) => {
+    const d = byIp.get(ip);
+    const place = geo.places.get(ip) || null;
+    return { ip, name: names[i], domain: names[i] ? domainOf(names[i]) : '', local: isNonPublic(ip), processes: [...d.processes], pids: [...d.pids], ports: [...d.ports], connections: d.count, lat: place?.lat ?? null, lon: place?.lon ?? null, city: place?.city || '', country: place?.country || '' };
+  });
+  return { sampledAt: snapshot.sampledAt, geoip: geo.status, geoipError: geo.error, attribution: { text: 'IP geolocation by DB-IP.com', url: 'https://db-ip.com', license: 'CC BY 4.0' }, destinations };
+}
+
 const server = createServer(async (req, res) => {
   const host = req.headers.host || '';
   if (!/^localhost(?::\d+)?$|^127\.0\.0\.1(?::\d+)?$/.test(host)) {
@@ -154,6 +188,14 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
     }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/atlas') {
+    let code = 200;
+    let body;
+    try { body = await atlasData(); } catch (error) { code = error.statusCode || 500; body = { error: error.message, geoip: 'unknown', destinations: [] }; }
+    const payload = JSON.stringify(body);
+    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(payload);
     return;
   }
   if (req.method === 'GET' && pathname === '/api/persistence') {

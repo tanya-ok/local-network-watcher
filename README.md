@@ -83,3 +83,23 @@ Results are cached per binary path while the server runs. The card reports facts
 ## Persistence
 
 The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified, loaded or unloaded. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
+
+## Star Atlas and offline GeoIP
+
+The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local and multicast addresses get no location.
+
+The database file is not in this repository. To add it:
+
+1. Download the current monthly `dbip-city-lite-YYYY-MM.mmdb.gz` from https://db-ip.com/db/download/ip-to-city-lite.
+2. Unpack it and place it at the default path:
+
+   ```fish
+   mkdir -p ~/Library/Application\ Support/LocalWatch/geoip
+   gunzip -c ~/Downloads/dbip-city-lite-*.mmdb.gz > ~/Library/Application\ Support/LocalWatch/geoip/dbip-city-lite.mmdb
+   ```
+
+3. Reload the tab. To use another path, start the server with `LOCAL_WATCH_GEOIP=/path/to/file.mmdb`.
+
+Without the file, `/api/atlas` reports `geoip: "missing"` and the tab places destinations on a ring around home. Home is a marker you set in the tab; it is stored only in this browser. Dot size is approximate because byte counters are per process, not per connection.
+
+IP geolocation by [DB-IP.com](https://db-ip.com), licensed under CC BY 4.0.

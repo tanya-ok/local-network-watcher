@@ -11,5 +11,8 @@
   },
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "mmdb-lib": "3.0.5"
   }
 }
