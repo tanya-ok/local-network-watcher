@@ -20,7 +20,7 @@ async function consoleRun(raw) {
   const arg = args.join(' ');
   try {
     if (verb === 'help') {
-      consolePrint('Guided commands\n  connections [text]   list live paths, optionally filtered\n  process <pid>         inspect a process, parents, signature and sockets\n  capture [5|10|30]     start a temporary TShark header capture\n  packets              open the packet table for detailed inspection\n  models               show local Ollama models\n  ask <question>        ask the configured local model\n  stop <pid>            send SIGTERM after an explicit confirmation\n  restart <pid>         not available yet; app relaunch needs a verified bundle mapping\n\nThis is a guided investigation console, not a general-purpose shell.');
+      consolePrint('Guided commands\n  connections [text]   list live paths, optionally filtered\n  process <pid>         inspect a process, parents, signature and sockets\n  capture [5|10|30]     start a temporary TShark header capture\n  packets              open the packet table for detailed inspection\n  models               show local Ollama models\n  ask <question>        ask the configured local model\n  stop <pid>            send SIGTERM after an explicit confirmation\n  tree <pid>            preview child processes, then SIGTERM children and parent\n  pause <pid>           send SIGSTOP (reversible) after confirmation\n  resume <pid>          send SIGCONT to a paused process\n  restart <pid>         launchctl kickstart -k, only for launchd jobs in your user domain\n\nThis is a guided investigation console, not a general-purpose shell.');
       return;
     }
     if (verb === 'connections') {
@@ -28,23 +28,20 @@ async function consoleRun(raw) {
       consolePrint(rows.length ? rows.slice(0,60).map((row) => `${row.process}  pid ${row.pid}  ${row.protocol||'network'}  ${row.local} → ${row.remote}  ${row.state||''}`).join('\n') : 'No live connections match that filter.');
       return;
     }
-    if (verb === 'process' || verb === 'stop' || verb === 'restart') {
-      if (verb === 'restart') { consolePrint('Restart is not enabled yet. The monitor needs a verified app or service launcher for each process before it can safely relaunch one.'); return; }
+    if (['process', 'stop', 'tree', 'pause', 'resume', 'restart'].includes(verb)) {
       const pid = Number(args[0]);
       if (!Number.isSafeInteger(pid) || pid < 2) { consolePrint(`Usage: ${verb} <pid>`, 'error'); return; }
       const response = await fetch(`/api/process?pid=${pid}`, {cache:'no-store'});
       const facts = await response.json();
       if (!response.ok) throw new Error(facts.error || 'Process not found.');
       if (verb === 'process') {
-        consolePrint([`${facts.command}`, `PID ${facts.pid} · parent ${facts.ppid} · user ${facts.user}`, `Started ${facts.started || 'unknown'}`, `Signature ${facts.signature || 'unknown'}`, `Folder ${facts.cwd || 'not visible'}`, `Parents: ${(facts.parents||[]).map((p)=>`${p.command} (${p.pid})`).join(' ← ') || 'none reported'}`, `Sockets:\n${(facts.sockets||[]).join('\n') || 'none visible'}`].join('\n'));
+        consolePrint([`${facts.command}`, `PID ${facts.pid} · parent ${facts.ppid} · user ${facts.user} · ${facts.paused ? 'paused' : 'running'}`, `Started ${facts.started || 'unknown'}`, `Signature ${facts.signature || 'unknown'}`, `Folder ${facts.cwd || 'not visible'}`, `Restart: ${facts.launchd?.managed ? `launchd job ${facts.launchd.label}` : `unavailable. ${facts.launchd?.reason || ''}`}`, `Parents: ${(facts.parents||[]).map((p)=>`${p.command} (${p.pid})`).join(' ← ') || 'none reported'}`, `Sockets:\n${(facts.sockets||[]).join('\n') || 'none visible'}`].join('\n'));
         return;
       }
-      const accepted = window.confirm(`Send SIGTERM to ${facts.command.split(' ')[0]} (PID ${pid})? The process may close unsaved work. This does not block its network access.`);
-      if (!accepted) { consolePrint(`Stopped request cancelled for PID ${pid}.`); return; }
-      const stopped = await fetch('/api/process/stop', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({pid,confirm:true})});
-      const result = await stopped.json().catch(()=>({}));
-      if (!stopped.ok) throw new Error(result.error || 'The process could not be stopped.');
-      consolePrint(`SIGTERM sent to ${result.process} (PID ${pid}). Recheck the process list to confirm it exited.`);
+      if (verb === 'restart' && !facts.launchd?.managed) { consolePrint(`Restart unavailable: ${facts.launchd?.reason || 'not a launchd job.'}`); return; }
+      const result = await processAction(verb, pid);
+      if (!result) { consolePrint(`Request cancelled for PID ${pid}.`); return; }
+      consolePrint(result.status === 'kickstarted' ? `launchd restarted ${result.label}. Recheck the process list for the new PID.` : `${result.signal} sent to ${(result.pids || [pid]).join(', ')}. Recheck the process list to confirm the state.`);
       return;
     }
     if (verb === 'capture') {

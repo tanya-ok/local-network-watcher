@@ -187,6 +187,11 @@ impl History {
         self.state.created_at + self.learning_ms
     }
 
+    /// First time this monitor saw an app name in local history.
+    pub fn app_first_seen(&self, name: &str) -> Option<u64> {
+        self.state.apps.get(name).map(|a| a.first_seen)
+    }
+
     pub fn app_count(&self) -> usize {
         self.state.apps.len()
     }

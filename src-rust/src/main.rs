@@ -3,8 +3,12 @@
 mod ai;
 mod capture;
 mod collector;
+mod control;
+mod egress;
 mod facts;
+mod geoip;
 mod history;
+mod settings;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
@@ -126,6 +130,7 @@ async fn settings(State(s): State<AppState>) -> Reply {
         json!({
             "learningUntil": h.learning_until(), "apps": h.app_count(), "file": h.file(),
             "explainModel": ai::model(), "sampleSeconds": 15, "port": s.port, "tshark": capture::TSHARK,
+            "reverseDns": s.caches.reverse_dns(),
         }),
     )
 }
@@ -234,15 +239,64 @@ async fn process(Query(q): Query<HashMap<String, String>>) -> Reply {
         .filter(|p| *p > 0);
     match pid {
         Some(pid) => match facts::process_facts(pid).await {
-            Some(f) => reply(StatusCode::OK, serde_json::to_value(f).unwrap_or_default()),
+            Some(f) => {
+                let mut v = serde_json::to_value(f).unwrap_or_default();
+                let stat = control::process_table()
+                    .await
+                    .into_iter()
+                    .find(|r| r.pid == pid)
+                    .map(|r| r.stat)
+                    .unwrap_or_default();
+                v["paused"] = Value::Bool(control::is_paused(&stat));
+                v["launchd"] = control::launchd_label(pid).await;
+                reply(StatusCode::OK, v)
+            }
             None => error(StatusCode::NOT_FOUND, "Process not found."),
         },
         None => error(StatusCode::NOT_FOUND, "Process not found."),
     }
 }
 
-/// Sends SIGTERM to a process the user owns, after an explicit confirmation in the page.
-async fn stop_process(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+/// stop, pause, resume or restart a process the user owns, after an explicit confirmation in the page.
+async fn process_control(
+    State(s): State<AppState>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
+    if !["stop", "pause", "resume", "restart"].contains(&action.as_str()) {
+        return error(StatusCode::NOT_FOUND, "Unknown process action.");
+    }
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 8192) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match control::control(&action, &map).await {
+        Ok(v) => reply(StatusCode::ACCEPTED, v),
+        Err(message) => {
+            control::log_action(json!({
+                "action": action, "pid": map.get("pid").cloned().unwrap_or(Value::Null),
+                "tree": map.get("tree") == Some(&Value::Bool(true)), "result": "refused", "error": message,
+            }));
+            error(StatusCode::BAD_REQUEST, &message)
+        }
+    }
+}
+
+async fn egress_status() -> Reply {
+    reply(StatusCode::OK, egress::status())
+}
+
+/// enable, pause or rule: the same Origin check as every other change, a 1 KB body.
+async fn egress_change(
+    State(s): State<AppState>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
     if !same_origin(&headers, s.port) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -250,63 +304,98 @@ async fn stop_process(State(s): State<AppState>, headers: HeaderMap, body: Bytes
         Ok(m) => m,
         Err(r) => return r,
     };
-    let pid = map
-        .get("pid")
-        .and_then(Value::as_u64)
-        .filter(|p| *p >= 2 && *p <= i32::MAX as u64)
-        .map(|p| p as u32);
-    let Some(pid) = pid.filter(|_| map.get("confirm") == Some(&Value::Bool(true))) else {
+    let result = match (
+        action.as_str(),
+        map.get("enabled"),
+        map.get("paused"),
+        map.get("action"),
+    ) {
+        ("enable", Some(Value::Bool(on)), _, _) => egress::set_enabled(*on).await,
+        ("pause", _, Some(Value::Bool(p)), _) => egress::set_paused(*p),
+        ("rule", _, _, Some(Value::String(a)))
+            if ["allow", "deny", "remove"].contains(&a.as_str()) =>
+        {
+            egress::change_rule(a, map.get("host").and_then(Value::as_str).unwrap_or(""))
+        }
+        ("ports", _, _, _) => {
+            egress::change_ports(map.get("ports").and_then(Value::as_str).unwrap_or(""))
+        }
+        _ => Err("Unknown egress change.".to_string()),
+    };
+    if let Err(message) = result {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
+    control::log_action(
+        json!({ "type": "egress", "path": format!("/api/egress/{action}"), "input": Value::Object(map) }),
+    );
+    reply(StatusCode::OK, egress::status())
+}
+
+fn query_pid(q: &HashMap<String, String>) -> u32 {
+    q.get("pid")
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+async fn process_tree(Query(q): Query<HashMap<String, String>>) -> Reply {
+    match control::tree_preview(query_pid(&q)).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+async fn process_trust(
+    State(s): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Reply {
+    let pid = query_pid(&q);
+    let path = if pid > 0 {
+        control::exe_path(pid).await
+    } else {
+        None
+    };
+    let Some(path) = path.filter(|p| p.starts_with('/')) else {
         return error(
-            StatusCode::BAD_REQUEST,
-            "Explicit confirmation and a valid process ID are required.",
+            StatusCode::NOT_FOUND,
+            "Executable path not visible for this process.",
         );
     };
-    let me = std::process::id();
-    if pid == me {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "The monitor itself cannot be stopped here.",
-        );
-    }
-    let Some(target) = facts::process_facts(pid).await else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "That process is no longer running.",
-        );
-    };
-    if target.user != facts::current_user() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Only processes owned by your current macOS account can be stopped.",
-        );
-    }
-    let mut ancestor = facts::parent_of(me).await;
-    for _ in 0..12 {
-        if ancestor <= 1 {
-            break;
-        }
-        if ancestor == pid {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "A parent process of this monitor cannot be stopped here.",
-            );
-        }
-        ancestor = facts::parent_of(ancestor).await;
-    }
-    // SAFETY: plain kill(2) with a validated pid and SIGTERM.
-    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
-        return error(StatusCode::BAD_REQUEST, "The signal could not be sent.");
-    }
-    let name = target
-        .command
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let mut facts = control::trust_facts(&path).await;
+    let app = q.get("app").map(String::as_str).unwrap_or("");
+    facts["firstSeen"] = json!(s.history.lock().await.app_first_seen(app));
+    reply(StatusCode::OK, facts)
+}
+
+async fn persistence() -> Reply {
+    let connections = collect().await.map(|s| s.connections).unwrap_or_default();
     reply(
-        StatusCode::ACCEPTED,
-        json!({ "status": "signal-sent", "signal": "SIGTERM", "pid": pid, "process": name }),
+        StatusCode::OK,
+        control::persistence_items(&connections).await,
     )
+}
+
+async fn persistence_job(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 4096) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let action = map.get("action").and_then(Value::as_str).unwrap_or("");
+    if map.get("confirm") != Some(&Value::Bool(true))
+        || !["stop", "disable", "enable"].contains(&action)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "A confirmed action of stop, disable or enable is required.",
+        );
+    }
+    let file = map.get("file").and_then(Value::as_str).unwrap_or("");
+    match control::change_job(action, file).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
 }
 
 async fn explain(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
@@ -462,6 +551,136 @@ async fn capture_clear(State(s): State<AppState>, headers: HeaderMap) -> Reply {
     no_content()
 }
 
+async fn set_reverse_dns(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let Some(enabled) = map.get("enabled").and_then(Value::as_bool) else {
+        return error(StatusCode::BAD_REQUEST, "enabled must be true or false.");
+    };
+    s.caches.set_reverse_dns(enabled);
+    // The setting still applies until restart when the file cannot be written.
+    let _ = settings::save_reverse_dns(enabled);
+    reply(StatusCode::OK, json!({ "reverseDns": enabled }))
+}
+
+async fn home_estimate() -> Reply {
+    reply(StatusCode::OK, settings::home_estimate())
+}
+
+fn host_of_remote(remote: &str) -> &str {
+    if let Some(rest) = remote.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or_default();
+    }
+    match (remote.find(':'), remote.rfind(':')) {
+        (Some(a), Some(b)) if a == b && a > 0 => &remote[..a],
+        _ => remote,
+    }
+}
+
+fn domain_of(name: &str) -> String {
+    let parts: Vec<&str> = name.trim_end_matches('.').split('.').collect();
+    parts[parts.len().saturating_sub(2)..].join(".")
+}
+
+/// Current destinations with offline coordinates for the Star Atlas.
+async fn atlas(State(s): State<AppState>) -> Reply {
+    let snapshot = match collect().await {
+        Ok(snap) => snap,
+        Err(message) => {
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": message, "geoip": "unknown", "destinations": [] }),
+            );
+        }
+    };
+    struct Dest {
+        processes: Vec<String>,
+        pids: Vec<u32>,
+        ports: Vec<String>,
+        count: u32,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by_ip: HashMap<String, Dest> = HashMap::new();
+    for row in &snapshot.connections {
+        let ip = host_of_remote(&row.remote).to_string();
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            continue;
+        }
+        let d = by_ip.entry(ip.clone()).or_insert_with(|| {
+            order.push(ip.clone());
+            Dest {
+                processes: vec![],
+                pids: vec![],
+                ports: vec![],
+                count: 0,
+            }
+        });
+        let port = row
+            .remote
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if !d.processes.contains(&row.process) {
+            d.processes.push(row.process.clone());
+        }
+        if !d.pids.contains(&row.pid) {
+            d.pids.push(row.pid);
+        }
+        if !d.ports.contains(&port) {
+            d.ports.push(port);
+        }
+        d.count += 1;
+    }
+    let lookup_ips = order.clone();
+    let geo = tokio::task::spawn_blocking(move || geoip::lookup(&lookup_ips))
+        .await
+        .unwrap_or(geoip::Lookup {
+            status: "error",
+            error: Some("GeoIP lookup stopped".into()),
+            places: HashMap::new(),
+        });
+    let mut tasks = tokio::task::JoinSet::new();
+    for ip in order.iter().filter(|ip| !geoip::is_non_public(ip)).cloned() {
+        let caches = s.caches.clone();
+        tasks.spawn(async move {
+            let name = caches.reverse_name(&ip).await;
+            (ip, name)
+        });
+    }
+    let mut names = HashMap::new();
+    while let Some(Ok((ip, name))) = tasks.join_next().await {
+        names.insert(ip, name);
+    }
+    let destinations: Vec<Value> = order
+        .iter()
+        .map(|ip| {
+            let d = &by_ip[ip];
+            let name = names.get(ip).cloned().unwrap_or_default();
+            let place = geo.places.get(ip);
+            json!({
+                "ip": ip, "domain": if name.is_empty() { String::new() } else { domain_of(&name) }, "name": name,
+                "local": geoip::is_non_public(ip), "processes": d.processes, "pids": d.pids, "ports": d.ports,
+                "connections": d.count, "lat": place.map(|p| p.lat), "lon": place.map(|p| p.lon),
+                "city": place.map(|p| p.city.as_str()).unwrap_or(""), "country": place.map(|p| p.country.as_str()).unwrap_or(""),
+            })
+        })
+        .collect();
+    reply(
+        StatusCode::OK,
+        json!({
+            "sampledAt": snapshot.sampled_at, "geoip": geo.status, "geoipError": geo.error,
+            "attribution": { "text": "IP geolocation by DB-IP.com", "url": "https://db-ip.com", "license": "CC BY 4.0" },
+            "destinations": destinations,
+        }),
+    )
+}
+
 // The page ships inside the binary: nothing is read from disk at request time.
 const ASSETS: &[(&str, &str, &[u8])] = &[
     (
@@ -495,6 +714,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../public/security.js"),
     ),
     (
+        "persistence-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/persistence-view.js"),
+    ),
+    (
+        "persistence.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/persistence.css"),
+    ),
+    (
         "styles.css",
         "text/css; charset=utf-8",
         include_bytes!("../../public/styles.css"),
@@ -523,6 +752,26 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         "process-table.css",
         "text/css; charset=utf-8",
         include_bytes!("../../public/process-table.css"),
+    ),
+    (
+        "egress-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/egress-view.js"),
+    ),
+    (
+        "egress.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/egress.css"),
+    ),
+    (
+        "star-atlas.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/star-atlas.js"),
+    ),
+    (
+        "star-atlas.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/star-atlas.css"),
     ),
 ];
 
@@ -619,11 +868,16 @@ async fn main() {
         capture: capture::Capture::new(),
         explaining: Arc::new(AtomicBool::new(false)),
     };
+    state.caches.set_reverse_dns(settings::load_reverse_dns());
     tokio::spawn(sampler(state.clone()));
+    egress::init().await;
 
     let app = Router::new()
         .route("/api/connections", get(connections))
         .route("/api/settings", get(settings))
+        .route("/api/settings/reverse-dns", post(set_reverse_dns))
+        .route("/api/home-estimate", get(home_estimate))
+        .route("/api/atlas", get(atlas))
         .route("/api/markers", get(markers))
         .route("/api/markers/accept", post(accept_marker))
         .route("/api/history", axum::routing::delete(forget_history))
@@ -631,7 +885,13 @@ async fn main() {
         .route("/api/names", get(names))
         .route("/api/route", get(route))
         .route("/api/process", get(process))
-        .route("/api/process/stop", post(stop_process))
+        .route("/api/process/tree", get(process_tree))
+        .route("/api/process/trust", get(process_trust))
+        .route("/api/process/{action}", post(process_control))
+        .route("/api/egress", get(egress_status))
+        .route("/api/egress/{action}", post(egress_change))
+        .route("/api/persistence", get(persistence))
+        .route("/api/persistence/job", post(persistence_job))
         .route("/api/explain", post(explain))
         .route("/api/models", get(models))
         .route("/api/ask", post(ask))

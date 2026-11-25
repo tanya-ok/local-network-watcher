@@ -33,10 +33,17 @@ This builds the release binary and installs `~/Applications/Local Network Watche
 - Connection snapshots are refreshed every three seconds from `lsof`; process byte and packet totals come from `nettop` and are not attributed to individual sockets. The optional process inventory is assembled from `ps` and `nettop`; the checkbox can include zero-valued processes visible in that snapshot. This is not guaranteed to equal every row Activity Monitor can show. The connection map remains limited to observed open remote sockets.
 - **Process traffic** lists 25 entries per page. Processes with a non-zero current rate appear first, followed by the highest observed rate. Search and the “include processes with no network counters” option apply to the full snapshot before paging.
 - The server samples every 15 seconds to build a local baseline. It stores process names, destination groups, ports, and timestamps in `~/Library/Application Support/LocalWatch/history.json` with restrictive file permissions. The Settings view can delete this history.
-- Reverse DNS requests use the Mac's configured resolver. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
+- Reverse DNS requests use the Mac's configured resolver (often the router). Settings > Address names turns them off; addresses are then shown as numbers and no reverse DNS queries are sent. The choice is stored in `settings.json` in the data folder; `LOCAL_WATCH_REVERSE_DNS=0` sets the default to off. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
 - “First seen” and other attention markers describe what this local baseline observed. They are investigation cues, not threat verdicts.
 - macOS may hide details for protected processes. Normal monitoring does not request administrator access.
-- A user can request SIGTERM for a same-account process after a confirmation. This may close unsaved work and does not block network access. Restart and network isolation are not implemented.
+- Process control is limited to processes owned by your macOS account, never PID 1, the monitor or its parent processes, and never uses sudo. Each action needs a confirmation dialog:
+  - Stop: SIGTERM. May close unsaved work.
+  - Stop tree: previews child processes first, then sends SIGTERM to children (deepest first) and the parent. Refused if the tree changed since the preview or contains a process of another account.
+  - Pause and resume: SIGSTOP and SIGCONT. Reversible. A paused GUI app freezes until resumed.
+  - Restart: only for launchd jobs found in `launchctl print gui/<uid>`, using `launchctl kickstart -k`. Unavailable for other processes, including GUI app instances registered by LaunchServices.
+- Every process action, including refusals, is appended as one JSON line to `actions.log` in the data folder (`LOCAL_WATCH_DATA` or `~/Library/Application Support/LocalWatch`), file mode 0600.
+- Process control does not block network access. Network isolation is not implemented.
+- **Egress** is an optional local proxy, off by default. It listens on loopback with two profiles: open (`127.0.0.1:4318`, everything passes except blocked domains) and strict (`127.0.0.1:4319`, only the allow list passes); `LOCAL_WATCH_EGRESS_OPEN_PORT` and `LOCAL_WATCH_EGRESS_STRICT_PORT` change the ports. Both always refuse a built-in list of hosted AI services and trackers, and refuse local network addresses. The policy is `egress.json` in the data folder. Each request is appended to `egress.log` in the data folder (host, port, result, reason, bytes), file mode 0600. Request contents are not read: HTTPS passes as an opaque tunnel. Only programs configured to use the proxy are covered; it does not force other traffic through itself. If a port is taken, the Egress tab shows which profile did not start. Only destination ports on the allowed list pass (80 and 443 by default, editable on the Egress tab). A direct IP address is refused unless that exact public address is on the allow list, because domain lists cannot judge a bare address. `egress.log` rotates at 5 MB and keeps the last 3 files.
 - This version does not enforce firewall rules or identify a connection as malicious.
 
 ## Capture
@@ -53,8 +60,8 @@ Capture runs for a configurable duration (5, 10 or 30 seconds; default 10) and s
 
 - **Map**: apps on the left, destinations on the right. Lines show live connections; after a capture their width follows captured bytes. Names can come from reverse DNS and from TLS server names seen in a capture.
 - Click a line, app or destination to open its inspector. The selected route stays highlighted while the live map refreshes.
-- **Security**: review local baseline markers, inspect a process's signature, parent chain, folder and sockets, and request SIGTERM after confirmation. Stopping a process does not block its network traffic.
-- **Map console**: guided commands for live connections, process inspection, temporary TShark capture, local model questions and stopping a process. It is not a general-purpose shell. `restart` is intentionally unavailable until the app can verify how each process should be relaunched.
+- **Security**: review local baseline markers, inspect a process's signature, parent chain, folder and sockets, and stop, stop as a tree, pause, resume or (for launchd jobs) restart it after confirmation. These actions do not block network traffic.
+- **Map console**: guided commands for live connections, process inspection, temporary TShark capture, local model questions and `stop`, `tree`, `pause`, `resume` and `restart` for a PID. It is not a general-purpose shell. `restart` works only for launchd jobs in your user domain.
 - **Flight Map**: choose one currently open connection and follow its process, socket, transport, interface, next-hop gateway and remote endpoint. Process names, socket endpoints and macOS route lookup are real local observations. Intermediate internet routers and the remote socket are outside this laptop's view. Process traffic totals are aggregate counts, not per-socket measurements. Click a stop for a plain explanation and its exact evidence.
 - **Map and Flight Map visuals**: the route plane and airport language are original reading aids. Animated paths do not claim to be packet-level traces. Packet evidence appears only after a TShark capture.
 - **Owner lookup**: selecting a destination runs `whois` for that address. This asks the public internet registry about the address.
@@ -71,3 +78,40 @@ Local Network Watcher is open source under the MIT License. Copyright and licens
 The server samples connections every 15 seconds, also while the page is closed, and learns what is normal for 24 hours. After that it marks, with one plain sentence: an app online for the first time, a new destination for an app, an unusual port, night activity (00:00 to 06:00) from an app that is rarely online then, and a sudden traffic burst. "Looks normal" silences a marker for good.
 
 History holds metadata only (app names, destination groups by reverse-DNS domain or network block, ports, times), never packet contents. It lives in `~/Library/Application Support/LocalWatch/history.json` (folder `0700`, file `0600`). Settings has a button to delete it. `LOCAL_WATCH_DATA` and `LOCAL_WATCH_LEARNING_HOURS` override the folder and the learning period.
+
+## Process trust card
+
+The Security view inspector shows a trust card for the selected process, served by `GET /api/process/trust?pid=<pid>&app=<name>`:
+
+- Code signature status, signing authority chain and Team ID from `codesign -dv --verbose=2`.
+- Gatekeeper result and notarization source from `spctl --assess --type execute -vv`.
+- Binary path, with a neutral note when it lives in `/tmp`, `/private/var/folders` or `~/Downloads`, or is unsigned or ad hoc signed.
+- First time the app name appeared in local history.
+
+Results are cached per binary path while the server runs. The card reports facts and their limits; it is not a malware verdict.
+
+## Persistence
+
+The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified; only the actions below load or unload them. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
+
+For your own LaunchAgents (`~/Library/LaunchAgents`) each card offers **Stop until next login** (`launchctl bootout`), **Stop and keep off** (`bootout` plus `launchctl disable`) and **Turn back on** (`enable` plus `bootstrap`). Every action needs a confirmation and is written to `actions.log`. Global agents and daemons in `/Library` need an administrator and are not changed; Apple jobs are never changed. For Homebrew services, `brew services stop <name>` does the same as Stop and keep off.
+
+## Star Atlas and offline GeoIP
+
+The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local, CGNAT and multicast addresses get no location.
+
+The database file is not in this repository. To add it:
+
+1. Download the current monthly `dbip-city-lite-YYYY-MM.mmdb.gz` from https://db-ip.com/db/download/ip-to-city-lite.
+2. Unpack it and place it at the default path:
+
+   ```fish
+   mkdir -p ~/Library/Application\ Support/LocalWatch/geoip
+   gunzip -c ~/Downloads/dbip-city-lite-*.mmdb.gz > ~/Library/Application\ Support/LocalWatch/geoip/dbip-city-lite.mmdb
+   ```
+
+3. Reload the tab. To use another path, start the server with `LOCAL_WATCH_GEOIP=/path/to/file.mmdb`.
+
+Without the file, `/api/atlas` reports `geoip: "missing"` and the tab places destinations on a ring around home. Home is a marker you set in the tab; it is stored only in this browser. Dot size is approximate because byte counters are per process, not per connection.
+
+IP geolocation by [DB-IP.com](https://db-ip.com), licensed under CC BY 4.0.

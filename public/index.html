@@ -11,12 +11,16 @@
   <link rel="stylesheet" href="/security.css">
   <link rel="stylesheet" href="/packet-details.css">
   <link rel="stylesheet" href="/process-table.css">
+  <link rel="stylesheet" href="/star-atlas.css">
   <link rel="stylesheet" href="/theme.css">
   <script defer src="/app.js"></script>
   <script defer src="/security.js"></script>
+<link rel="stylesheet" href="/egress.css"><script defer src="/egress-view.js"></script>
+<link rel="stylesheet" href="/persistence.css"><script defer src="/persistence-view.js"></script>
   <script defer src="/console.js"></script>
   <script defer src="/howitworks.js"></script>
   <script defer src="/flight-map.js"></script>
+  <script defer src="/star-atlas.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -27,9 +31,12 @@
         <a class="nav-item" href="#map"><span class="nav-icon">⇄</span>Map</a>
         <a class="nav-item" href="#security"><span class="nav-icon">⌑</span>Security</a>
         <a class="nav-item" href="#processes"><span class="nav-icon">⌘</span>Processes</a>
+        <a class="nav-item" href="#persistence"><span class="nav-icon">↻</span>Persistence</a>
+        <a class="nav-item" href="#egress"><span class="nav-icon">⇥</span>Egress</a>
         <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
         <a class="nav-item" href="#capture"><span class="nav-icon">◎</span>Capture</a>
         <a class="nav-item" href="#flight-map"><span class="nav-icon">✈</span>Flight Map</a>
+        <a class="nav-item" href="#star-atlas"><span class="nav-icon">✦</span>Star Atlas</a>
         <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
       </nav>
       <div class="rail-note">ON THIS MAC<br><span>Private by design</span></div>
@@ -65,9 +72,11 @@
           <div class="security-controls"><label class="filter-label" for="security-process">Process <select id="security-process"><option value="">Loading live processes…</option></select></label><button id="security-inspect" class="cap-button" type="button">Inspect process</button></div>
           <div id="security-detail" class="flow-inspector"><div class="inspector-empty">Select a process to review its local system facts.</div></div>
         </div>
-        <div class="security-limits"><div><b>Stop process</b><p>After inspection and confirmation, sends SIGTERM to a process owned by your account. It may close unsaved work.</p></div><div><b>Network access</b><p>This action does not block or isolate traffic. Network blocking needs a separate macOS firewall integration.</p></div><div><b>Packet contents</b><p>TShark can inspect selected headers during a short capture. It cannot read TLS-encrypted app contents.</p></div></div>
+        <div class="security-limits"><div><b>Process control</b><p>After inspection and confirmation: stop (SIGTERM), stop a previewed process tree, pause (SIGSTOP) and resume (SIGCONT) for processes owned by your account. Restart is offered only for launchd jobs in your user domain. Every action is written to a local action log.</p></div><div><b>Network access</b><p>This action does not block or isolate traffic. Network blocking needs a separate macOS firewall integration.</p></div><div><b>Packet contents</b><p>TShark can inspect selected headers during a short capture. It cannot read TLS-encrypted app contents.</p></div></div>
       </section>
       <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-tools"><label class="process-all-toggle"><input id="process-show-all" type="checkbox"> Include processes with no network counters</label><label class="filter-label" for="process-search">Find <input id="process-search" type="search" placeholder="process, PID or user"></label><span id="process-list-count" aria-live="polite"></span></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>User</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><nav class="process-pagination" aria-label="Process list pages"><button id="process-prev" type="button" aria-label="Previous page">← Previous</button><span id="process-page" aria-live="polite">Page 1 of 1</span><button id="process-next" type="button" aria-label="Next page">Next →</button></nav><p class="metrics-note">Shows 25 processes per page, with processes sending or receiving data now first. Byte and packet totals are process-level counts since launch, not per-socket measurements. The live rate is calculated from consecutive system snapshots.</p></section>
+      <section id="egress" class="view" aria-labelledby="egress-heading"><div class="section-bar"><div><h2 id="egress-heading">Egress</h2><p>A local proxy that decides what may leave this Mac, and keeps a journal of it.</p></div></div><form class="egress-form" id="egress-form"><input name="host" type="text" placeholder="example.com" aria-label="Domain" required><button class="text-button" type="submit" value="allow">Allow</button><button class="text-button" type="submit" value="deny">Block</button></form><div id="egress-body"></div><p class="metrics-note" id="egress-note"></p></section>
+      <section id="persistence" class="view" aria-labelledby="persistence-heading"><div class="section-bar"><div><h2 id="persistence-heading">Persistence</h2><p>What macOS starts on its own, and which of those talk to the network.</p></div><button class="text-button" id="persistence-refresh" type="button">Refresh</button></div><div class="pers-tools"><input id="persistence-search" type="search" placeholder="Filter by name or program" aria-label="Filter persistence entries"></div><div id="persistence-body"></div><p class="metrics-note" id="persistence-note">Apple system entries are listed only when they match a networked process.</p></section>
       <section id="events" class="view" aria-labelledby="events-heading"><div class="section-bar"><div><h2 id="events-heading">Recent events</h2><p>Connection changes observed while this page is open.</p></div><button class="text-button" id="clear-events" type="button">Clear history</button></div><div id="event-list" class="event-list"></div></section>
       <section id="flight-map" class="view" aria-labelledby="flight-map-heading">
         <div class="flight-intro"><span class="eyebrow">Live path · selected from this Mac</span><h2 id="flight-map-heading">Follow a connection</h2><p>Choose an open socket. Read its process, endpoints and route evidence from left to right.</p></div>
@@ -77,6 +86,14 @@
         <article id="flight-detail" class="flight-detail" aria-live="polite"><div class="inspector-empty">Choose a live connection to inspect its path.</div></article>
         <p id="flight-route-note" class="flight-note">The dotted line is an explanatory route, not a packet trace.</p>
         <div class="flight-actions"><a class="lesson-action" href="#capture">Inspect packet headers with TShark <span aria-hidden="true">↗</span></a><a class="lesson-action" href="#map">Open network map <span aria-hidden="true">↗</span></a></div>
+      </section>
+      <section id="star-atlas" class="view" aria-labelledby="star-atlas-heading">
+        <div class="flight-intro"><span class="eyebrow">Destinations · offline GeoIP</span><h2 id="star-atlas-heading">Star Atlas</h2><p>Where open connections go, on an equal-area map. Arcs leave home in the color of the owning process. Click a star to inspect it on the Map.</p></div>
+        <div class="atlas-card"><svg id="atlas-svg" class="atlas-svg" viewBox="0 0 900 440" role="group" aria-label="Destinations on an equal-area world graticule"></svg><p id="atlas-note" class="atlas-note" aria-live="polite">Loading destinations…</p></div>
+        <div class="atlas-card"><div id="atlas-key" class="atlas-key"></div>
+          <div class="atlas-foot"><span>Dot size is approximate: it uses process-level bytes, shared by every connection of that process. A rust halo marks a new destination.</span><span><a href="https://db-ip.com" rel="noopener noreferrer" target="_blank">IP geolocation by DB-IP.com</a> (CC BY 4.0)</span></div>
+          <form id="atlas-home" class="atlas-home-form"><span>Home: from this Mac's time zone unless you set it (stored in this browser, never looked up online):</span><label>lat <input name="lat" type="number" step="any" min="-90" max="90"></label><label>lon <input name="lon" type="number" step="any" min="-180" max="180"></label><button type="submit">Set</button></form>
+        </div>
       </section>
       <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span id="history-info">Connection history (apps, destination groups, ports, times) on this Mac only</span></div><div><strong>Forget history</strong><span><button id="forget-history" class="text-button" type="button">Delete the learned history</button></span></div><div><strong>Packet inspection</strong><span>Manual TShark capture, headers only, memory only</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture runs only when you start it on the Capture tab, for 5 to 30 seconds. Blocking and isolation need a separate macOS Network Extension.</p></section>
       <section id="capture" class="view" aria-labelledby="capture-heading">
