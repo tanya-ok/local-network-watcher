@@ -5,7 +5,9 @@ mod capture;
 mod collector;
 mod control;
 mod facts;
+mod geoip;
 mod history;
+mod settings;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
@@ -127,6 +129,7 @@ async fn settings(State(s): State<AppState>) -> Reply {
         json!({
             "learningUntil": h.learning_until(), "apps": h.app_count(), "file": h.file(),
             "explainModel": ai::model(), "sampleSeconds": 15, "port": s.port, "tshark": capture::TSHARK,
+            "reverseDns": s.caches.reverse_dns(),
         }),
     )
 }
@@ -502,6 +505,136 @@ async fn capture_clear(State(s): State<AppState>, headers: HeaderMap) -> Reply {
     no_content()
 }
 
+async fn set_reverse_dns(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let Some(enabled) = map.get("enabled").and_then(Value::as_bool) else {
+        return error(StatusCode::BAD_REQUEST, "enabled must be true or false.");
+    };
+    s.caches.set_reverse_dns(enabled);
+    // The setting still applies until restart when the file cannot be written.
+    let _ = settings::save_reverse_dns(enabled);
+    reply(StatusCode::OK, json!({ "reverseDns": enabled }))
+}
+
+async fn home_estimate() -> Reply {
+    reply(StatusCode::OK, settings::home_estimate())
+}
+
+fn host_of_remote(remote: &str) -> &str {
+    if let Some(rest) = remote.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or_default();
+    }
+    match (remote.find(':'), remote.rfind(':')) {
+        (Some(a), Some(b)) if a == b && a > 0 => &remote[..a],
+        _ => remote,
+    }
+}
+
+fn domain_of(name: &str) -> String {
+    let parts: Vec<&str> = name.trim_end_matches('.').split('.').collect();
+    parts[parts.len().saturating_sub(2)..].join(".")
+}
+
+/// Current destinations with offline coordinates for the Star Atlas.
+async fn atlas(State(s): State<AppState>) -> Reply {
+    let snapshot = match collect().await {
+        Ok(snap) => snap,
+        Err(message) => {
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": message, "geoip": "unknown", "destinations": [] }),
+            );
+        }
+    };
+    struct Dest {
+        processes: Vec<String>,
+        pids: Vec<u32>,
+        ports: Vec<String>,
+        count: u32,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by_ip: HashMap<String, Dest> = HashMap::new();
+    for row in &snapshot.connections {
+        let ip = host_of_remote(&row.remote).to_string();
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            continue;
+        }
+        let d = by_ip.entry(ip.clone()).or_insert_with(|| {
+            order.push(ip.clone());
+            Dest {
+                processes: vec![],
+                pids: vec![],
+                ports: vec![],
+                count: 0,
+            }
+        });
+        let port = row
+            .remote
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if !d.processes.contains(&row.process) {
+            d.processes.push(row.process.clone());
+        }
+        if !d.pids.contains(&row.pid) {
+            d.pids.push(row.pid);
+        }
+        if !d.ports.contains(&port) {
+            d.ports.push(port);
+        }
+        d.count += 1;
+    }
+    let lookup_ips = order.clone();
+    let geo = tokio::task::spawn_blocking(move || geoip::lookup(&lookup_ips))
+        .await
+        .unwrap_or(geoip::Lookup {
+            status: "error",
+            error: Some("GeoIP lookup stopped".into()),
+            places: HashMap::new(),
+        });
+    let mut tasks = tokio::task::JoinSet::new();
+    for ip in order.iter().filter(|ip| !geoip::is_non_public(ip)).cloned() {
+        let caches = s.caches.clone();
+        tasks.spawn(async move {
+            let name = caches.reverse_name(&ip).await;
+            (ip, name)
+        });
+    }
+    let mut names = HashMap::new();
+    while let Some(Ok((ip, name))) = tasks.join_next().await {
+        names.insert(ip, name);
+    }
+    let destinations: Vec<Value> = order
+        .iter()
+        .map(|ip| {
+            let d = &by_ip[ip];
+            let name = names.get(ip).cloned().unwrap_or_default();
+            let place = geo.places.get(ip);
+            json!({
+                "ip": ip, "domain": if name.is_empty() { String::new() } else { domain_of(&name) }, "name": name,
+                "local": geoip::is_non_public(ip), "processes": d.processes, "pids": d.pids, "ports": d.ports,
+                "connections": d.count, "lat": place.map(|p| p.lat), "lon": place.map(|p| p.lon),
+                "city": place.map(|p| p.city.as_str()).unwrap_or(""), "country": place.map(|p| p.country.as_str()).unwrap_or(""),
+            })
+        })
+        .collect();
+    reply(
+        StatusCode::OK,
+        json!({
+            "sampledAt": snapshot.sampled_at, "geoip": geo.status, "geoipError": geo.error,
+            "attribution": { "text": "IP geolocation by DB-IP.com", "url": "https://db-ip.com", "license": "CC BY 4.0" },
+            "destinations": destinations,
+        }),
+    )
+}
+
 // The page ships inside the binary: nothing is read from disk at request time.
 const ASSETS: &[(&str, &str, &[u8])] = &[
     (
@@ -573,6 +706,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         "process-table.css",
         "text/css; charset=utf-8",
         include_bytes!("../../public/process-table.css"),
+    ),
+    (
+        "star-atlas.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/star-atlas.js"),
+    ),
+    (
+        "star-atlas.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/star-atlas.css"),
     ),
 ];
 
@@ -669,11 +812,15 @@ async fn main() {
         capture: capture::Capture::new(),
         explaining: Arc::new(AtomicBool::new(false)),
     };
+    state.caches.set_reverse_dns(settings::load_reverse_dns());
     tokio::spawn(sampler(state.clone()));
 
     let app = Router::new()
         .route("/api/connections", get(connections))
         .route("/api/settings", get(settings))
+        .route("/api/settings/reverse-dns", post(set_reverse_dns))
+        .route("/api/home-estimate", get(home_estimate))
+        .route("/api/atlas", get(atlas))
         .route("/api/markers", get(markers))
         .route("/api/markers/accept", post(accept_marker))
         .route("/api/history", axum::routing::delete(forget_history))

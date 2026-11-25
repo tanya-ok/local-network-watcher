@@ -30,15 +30,32 @@ pub fn valid_ip(ip: &str) -> bool {
 pub struct Caches {
     names: Mutex<HashMap<String, String>>,
     owners: Mutex<HashMap<String, Owner>>,
+    reverse_off: std::sync::atomic::AtomicBool,
 }
 
 impl Caches {
+    pub fn reverse_dns(&self) -> bool {
+        !self.reverse_off.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Turning reverse DNS off also drops every cached name.
+    pub fn set_reverse_dns(&self, enabled: bool) {
+        self.reverse_off
+            .store(!enabled, std::sync::atomic::Ordering::SeqCst);
+        if !enabled && let Ok(mut m) = self.names.lock() {
+            m.clear();
+        }
+    }
+
     pub fn names_snapshot(&self) -> HashMap<String, String> {
         self.names.lock().map(|m| m.clone()).unwrap_or_default()
     }
 
     /// Reverse DNS with a 1.5 s limit; failures are cached as an empty name.
     pub async fn reverse_name(&self, ip: &str) -> String {
+        if !self.reverse_dns() {
+            return String::new();
+        }
         if let Some(name) = self.names.lock().ok().and_then(|m| m.get(ip).cloned()) {
             return name;
         }
@@ -54,6 +71,9 @@ impl Caches {
             }
             Err(_) => String::new(),
         };
+        if !self.reverse_dns() {
+            return String::new();
+        }
         if let Ok(mut m) = self.names.lock() {
             if m.len() > 5000 {
                 m.clear();

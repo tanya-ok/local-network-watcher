@@ -33,7 +33,7 @@ This builds the release binary and installs `~/Applications/Local Network Watche
 - Connection snapshots are refreshed every three seconds from `lsof`; process byte and packet totals come from `nettop` and are not attributed to individual sockets. The optional process inventory is assembled from `ps` and `nettop`; the checkbox can include zero-valued processes visible in that snapshot. This is not guaranteed to equal every row Activity Monitor can show. The connection map remains limited to observed open remote sockets.
 - **Process traffic** lists 25 entries per page. Processes with a non-zero current rate appear first, followed by the highest observed rate. Search and the “include processes with no network counters” option apply to the full snapshot before paging.
 - The server samples every 15 seconds to build a local baseline. It stores process names, destination groups, ports, and timestamps in `~/Library/Application Support/LocalWatch/history.json` with restrictive file permissions. The Settings view can delete this history.
-- Reverse DNS requests use the Mac's configured resolver. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
+- Reverse DNS requests use the Mac's configured resolver (often the router). Settings > Address names turns them off; addresses are then shown as numbers and no reverse DNS queries are sent. The choice is stored in `settings.json` in the data folder; `LOCAL_WATCH_REVERSE_DNS=0` sets the default to off. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
 - “First seen” and other attention markers describe what this local baseline observed. They are investigation cues, not threat verdicts.
 - macOS may hide details for protected processes. Normal monitoring does not request administrator access.
 - Process control is limited to processes owned by your macOS account, never PID 1, the monitor or its parent processes, and never uses sudo. Each action needs a confirmation dialog:
@@ -94,3 +94,23 @@ Results are cached per binary path while the server runs. The card reports facts
 The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified; only the actions below load or unload them. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
 
 For your own LaunchAgents (`~/Library/LaunchAgents`) each card offers **Stop until next login** (`launchctl bootout`), **Stop and keep off** (`bootout` plus `launchctl disable`) and **Turn back on** (`enable` plus `bootstrap`). Every action needs a confirmation and is written to `actions.log`. Global agents and daemons in `/Library` need an administrator and are not changed; Apple jobs are never changed. For Homebrew services, `brew services stop <name>` does the same as Stop and keep off.
+
+## Star Atlas and offline GeoIP
+
+The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local, CGNAT and multicast addresses get no location.
+
+The database file is not in this repository. To add it:
+
+1. Download the current monthly `dbip-city-lite-YYYY-MM.mmdb.gz` from https://db-ip.com/db/download/ip-to-city-lite.
+2. Unpack it and place it at the default path:
+
+   ```fish
+   mkdir -p ~/Library/Application\ Support/LocalWatch/geoip
+   gunzip -c ~/Downloads/dbip-city-lite-*.mmdb.gz > ~/Library/Application\ Support/LocalWatch/geoip/dbip-city-lite.mmdb
+   ```
+
+3. Reload the tab. To use another path, start the server with `LOCAL_WATCH_GEOIP=/path/to/file.mmdb`.
+
+Without the file, `/api/atlas` reports `geoip: "missing"` and the tab places destinations on a ring around home. Home is a marker you set in the tab; it is stored only in this browser. Dot size is approximate because byte counters are per process, not per connection.
+
+IP geolocation by [DB-IP.com](https://db-ip.com), licensed under CC BY 4.0.

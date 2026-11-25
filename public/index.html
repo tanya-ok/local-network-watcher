@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/security.css">
   <link rel="stylesheet" href="/packet-details.css">
   <link rel="stylesheet" href="/process-table.css">
+  <link rel="stylesheet" href="/star-atlas.css">
   <link rel="stylesheet" href="/theme.css">
   <script defer src="/app.js"></script>
   <script defer src="/security.js"></script>
@@ -18,6 +19,7 @@
   <script defer src="/console.js"></script>
   <script defer src="/howitworks.js"></script>
   <script defer src="/flight-map.js"></script>
+  <script defer src="/star-atlas.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -32,6 +34,7 @@
         <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
         <a class="nav-item" href="#capture"><span class="nav-icon">◎</span>Capture</a>
         <a class="nav-item" href="#flight-map"><span class="nav-icon">✈</span>Flight Map</a>
+        <a class="nav-item" href="#star-atlas"><span class="nav-icon">✦</span>Star Atlas</a>
         <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>Settings</a>
       </nav>
       <div class="rail-note">ON THIS MAC<br><span>Private by design</span></div>
@@ -80,6 +83,14 @@
         <article id="flight-detail" class="flight-detail" aria-live="polite"><div class="inspector-empty">Choose a live connection to inspect its path.</div></article>
         <p id="flight-route-note" class="flight-note">The dotted line is an explanatory route, not a packet trace.</p>
         <div class="flight-actions"><a class="lesson-action" href="#capture">Inspect packet headers with TShark <span aria-hidden="true">↗</span></a><a class="lesson-action" href="#map">Open network map <span aria-hidden="true">↗</span></a></div>
+      </section>
+      <section id="star-atlas" class="view" aria-labelledby="star-atlas-heading">
+        <div class="flight-intro"><span class="eyebrow">Destinations · offline GeoIP</span><h2 id="star-atlas-heading">Star Atlas</h2><p>Where open connections go, on an equal-area map. Arcs leave home in the color of the owning process. Click a star to inspect it on the Map.</p></div>
+        <div class="atlas-card"><svg id="atlas-svg" class="atlas-svg" viewBox="0 0 900 440" role="group" aria-label="Destinations on an equal-area world graticule"></svg><p id="atlas-note" class="atlas-note" aria-live="polite">Loading destinations…</p></div>
+        <div class="atlas-card"><div id="atlas-key" class="atlas-key"></div>
+          <div class="atlas-foot"><span>Dot size is approximate: it uses process-level bytes, shared by every connection of that process. A rust halo marks a new destination.</span><span><a href="https://db-ip.com" rel="noopener noreferrer" target="_blank">IP geolocation by DB-IP.com</a> (CC BY 4.0)</span></div>
+          <form id="atlas-home" class="atlas-home-form"><span>Home: from this Mac's time zone unless you set it (stored in this browser, never looked up online):</span><label>lat <input name="lat" type="number" step="any" min="-90" max="90"></label><label>lon <input name="lon" type="number" step="any" min="-180" max="180"></label><button type="submit">Set</button></form>
+        </div>
       </section>
       <section id="settings" class="view" aria-labelledby="settings-heading"><div class="section-bar"><div><h2 id="settings-heading">Device settings</h2><p>How this first version observes your Mac.</p></div></div><div class="settings-sheet"><div><strong>Connection source</strong><span>macOS lsof + nettop · read-only</span></div><div><strong>Refresh interval</strong><span>Every 3 seconds</span></div><div><strong>Data storage</strong><span id="history-info">Connection history (apps, destination groups, ports, times) on this Mac only</span></div><div><strong>Forget history</strong><span><button id="forget-history" class="text-button" type="button">Delete the learned history</button></span></div><div><strong>Packet inspection</strong><span>Manual TShark capture, headers only, memory only</span></div></div><p class="settings-note">This monitor lists socket endpoints and process-level byte/packet counters that macOS makes visible to your account. It does not capture packet contents, decrypt encrypted traffic or identify a connection as harmful. Packet capture runs only when you start it on the Capture tab, for 5 to 30 seconds. Blocking and isolation need a separate macOS Network Extension.</p></section>
       <section id="capture" class="view" aria-labelledby="capture-heading">
