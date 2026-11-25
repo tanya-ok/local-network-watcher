@@ -79,3 +79,7 @@ The Security view inspector shows a trust card for the selected process, served 
 - First time the app name appeared in local history.
 
 Results are cached per binary path while the server runs. The card reports facts and their limits; it is not a malware verdict.
+
+## Persistence
+
+The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified, loaded or unloaded. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.

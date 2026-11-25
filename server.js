@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } from './process-control.js';
 import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 import { exePath, trustFacts } from './trust.js';
+import { persistenceItems } from './persistence.js';
 
 const exec = promisify(execFile);
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -153,6 +154,13 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
     }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/persistence') {
+    let connections = [];
+    try { connections = (await activeConnections()).connections || []; } catch {}
+    const data = await persistenceItems(connections);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/settings') {
