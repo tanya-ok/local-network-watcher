@@ -146,3 +146,8 @@ export function accept(key) {
 export function summary() {
   return { learningUntil: learningUntil(), apps: Object.keys(state.apps).length, file: HISTORY_FILE };
 }
+
+// First time this monitor saw an app name in local history, or null.
+export function appFirstSeen(name) {
+  return state?.apps?.[name]?.firstSeen ?? null;
+}

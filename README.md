@@ -62,3 +62,14 @@ Local Network Watcher is open source under the MIT License. Copyright and licens
 The server samples connections every 15 seconds, also while the page is closed, and learns what is normal for 24 hours. After that it marks, with one plain sentence: an app online for the first time, a new destination for an app, an unusual port, night activity (00:00 to 06:00) from an app that is rarely online then, and a sudden traffic burst. "Looks normal" silences a marker for good.
 
 History holds metadata only (app names, destination groups by reverse-DNS domain or network block, ports, times), never packet contents. It lives in `~/Library/Application Support/LocalWatch/history.json` (folder `0700`, file `0600`). Settings has a button to delete it. `LOCAL_WATCH_DATA` and `LOCAL_WATCH_LEARNING_HOURS` override the folder and the learning period.
+
+## Process trust card
+
+The Security view inspector shows a trust card for the selected process, served by `GET /api/process/trust?pid=<pid>&app=<name>`:
+
+- Code signature status, signing authority chain and Team ID from `codesign -dv --verbose=2`.
+- Gatekeeper result and notarization source from `spctl --assess --type execute -vv`.
+- Binary path, with a neutral note when it lives in `/tmp`, `/private/var/folders` or `~/Downloads`, or is unsigned or ad hoc signed.
+- First time the app name appeared in local history.
+
+Results are cached per binary path while the server runs. The card reports facts and their limits; it is not a malware verdict.

@@ -6,7 +6,9 @@ import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accept, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
+import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
+
+import { exePath, trustFacts } from './trust.js';
 
 const exec = promisify(execFile);
 const root = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -161,6 +163,15 @@ const server = createServer(async (req, res) => {
     const pid = Number(new URL(req.url, 'http://localhost').searchParams.get('pid'));
     const facts = Number.isInteger(pid) && pid > 0 ? await processFacts(pid) : null;
     res.writeHead(facts ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(facts || { error: 'Process not found.' }));
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/process/trust') {
+    const params = new URL(req.url, 'http://localhost').searchParams;
+    const pid = Number(params.get('pid'));
+    const path = Number.isInteger(pid) && pid > 0 ? await exePath(pid) : null;
+    if (!path || !path.startsWith('/')) { res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: 'Executable path not visible for this process.' })); return; }
+    const facts = await trustFacts(path);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...facts, firstSeen: appFirstSeen(params.get('app') || '') }));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/route') {
