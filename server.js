@@ -3,6 +3,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reverse } from 'node:dns/promises';
 import { readFile } from 'node:fs/promises';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,8 +51,17 @@ async function listInterfaces() {
   return stdout.split('\n').map((line) => line.match(/^\d+\.\s+(\S+)(?:\s+\((.*)\))?\s*$/)).filter(Boolean).map((m) => ({ name: m[1], description: m[2] || '' }));
 }
 
+const SETTINGS_DIR = process.env.LOCAL_WATCH_DATA || join(homedir(), 'Library', 'Application Support', 'LocalWatch');
+const SETTINGS_FILE = join(SETTINGS_DIR, 'settings.json');
+const userSettings = { reverseDns: process.env.LOCAL_WATCH_REVERSE_DNS !== '0' };
+try { Object.assign(userSettings, JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))); } catch { /* defaults */ }
+function saveSettings() {
+  mkdirSync(SETTINGS_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings), { mode: 0o600 });
+}
 const nameCache = new Map();
 async function reverseName(ip) {
+  if (!userSettings.reverseDns) return '';
   if (nameCache.has(ip)) return nameCache.get(ip);
   let name = '';
   try {
@@ -143,6 +154,7 @@ async function activeConnections() {
 
 const atlasNames = new Map();
 async function atlasName(ip) {
+  if (!userSettings.reverseDns) return '';
   if (atlasNames.has(ip)) return atlasNames.get(ip);
   let name = '';
   try { name = (await Promise.race([reverse(ip), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 800))]))[0] || ''; } catch {}
@@ -205,8 +217,22 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     return;
   }
+  if (req.method === 'POST' && pathname === '/api/settings/reverse-dns') {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    let enabled;
+    try { enabled = JSON.parse(body).enabled; } catch { /* invalid */ }
+    if (typeof enabled !== 'boolean') { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'enabled must be true or false.' })); return; }
+    userSettings.reverseDns = enabled;
+    if (!enabled) { nameCache.clear(); atlasNames.clear(); }
+    try { saveSettings(); } catch { /* setting still applies until restart */ }
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ reverseDns: enabled }));
+    return;
+  }
   if (req.method === 'GET' && pathname === '/api/settings') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), explainModel: EXPLAIN_MODEL, sampleSeconds: 15, port, tshark: TSHARK }));
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), explainModel: EXPLAIN_MODEL, sampleSeconds: 15, port, tshark: TSHARK, reverseDns: userSettings.reverseDns }));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/process') {

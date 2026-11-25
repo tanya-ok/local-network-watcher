@@ -560,7 +560,7 @@ async function renderSettings() {
     ['Server', `127.0.0.1:${s.port || 4317}`, local, 'answers only this Mac'],
     ['TShark', 'packet headers, on your click', local, 'Wireshark project'],
     ['Ollama', s.explainModel || 'local model', local, 'explanations, on your click'],
-    ['DNS', 'names for addresses', net, 'asks your DNS resolver'],
+    ['DNS', s.reverseDns === false ? 'off: addresses stay numbers' : 'names for addresses', net, s.reverseDns === false ? 'no lookups sent' : 'asks your DNS resolver'],
     ['whois', 'owner of an address', net, 'asks the public registry'],
   ];
   const W = 900, colW = W / 4;
@@ -577,10 +577,15 @@ async function renderSettings() {
       <article class="set-card wide"><h3>What runs where</h3><div class="hiw-canvas">${flowSvg}</div><div class="proc-legend"><span><i style="background:${local}"></i>stays on this Mac</span><span><i style="background:${net}"></i>asks the network (only names and owners of addresses, never your data)</span></div></article>
       <article class="set-card"><h3>Learning what is normal</h3><div class="learn-bar"><span style="width:${(progress * 100).toFixed(0)}%"></span></div><p>${progress < 1 ? `Learning until ${esc(new Date(s.learningUntil).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))}. Markers start after that.` : 'Learning done. New apps, destinations, ports, night activity and traffic bursts are marked in red with a reason.'}</p><p class="set-num"><b>${esc(s.apps ?? '-')}</b> apps learned · sampled every ${esc(s.sampleSeconds || 15)} s</p></article>
       <article class="set-card"><h3>Stored on this Mac</h3><p id="history-info">${esc(s.file || '')}</p><p class="learn-note">Only metadata: app names, destination groups, ports and times. Never packet contents. Folder readable by you only.</p><button id="forget-history-2" class="cap-button" type="button">Delete the learned history</button></article>
+      <article class="set-card"><h3>Address names</h3><p>${s.reverseDns === false ? 'Off. Addresses are shown as numbers and no reverse DNS queries leave this Mac.' : 'On. Reverse DNS asks your configured resolver (often your router) for a name for each remote address.'}</p><button class="cap-button set-rdns" type="button">${s.reverseDns === false ? 'Turn reverse DNS on' : 'Turn reverse DNS off'}</button><p class="learn-note">Turning it off also clears names already looked up. Destination groups in the learned history fall back to network blocks.</p></article>
       <article class="set-card"><h3>Display</h3><p>Animated traffic follows bytes per second.</p><button class="cap-button set-motion" type="button">${motionOn ? 'Turn motion off' : 'Turn motion on'}</button><p class="learn-note">Refreshes every 3 seconds.</p></article>
       <article class="set-card"><h3>Promises</h3><ul class="promise"><li>Listens on 127.0.0.1 only; other devices cannot open it.</li><li>Packet capture only after your click and confirmation, 5 to 30 seconds, memory only.</li><li>AI explanations from a model on this Mac only.</li><li>No admin rights. No firewall changes. Blocking is not built.</li></ul></article>
     </div>`);
   section.querySelector('.set-motion').addEventListener('click', () => { motionToggle.click(); renderSettings(); });
+  section.querySelector('.set-rdns').addEventListener('click', async () => {
+    await fetch('/api/settings/reverse-dns', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: s.reverseDns === false }) });
+    renderSettings();
+  });
   const forget = section.querySelector('#forget-history-2');
   forget.addEventListener('click', async () => {
     if (forget.dataset.armed !== 'yes') { forget.dataset.armed = 'yes'; forget.textContent = 'Press again to delete. Learning starts over.'; return; }
