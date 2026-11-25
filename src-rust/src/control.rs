@@ -44,7 +44,7 @@ pub async fn exec(program: &str, args: &[&str], timeout: Duration) -> Out {
 
 const SHORT: Duration = Duration::from_secs(5);
 
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     std::env::var_os("LOCAL_WATCH_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -90,7 +90,7 @@ pub fn log_action(mut entry: Value) {
     })();
 }
 
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

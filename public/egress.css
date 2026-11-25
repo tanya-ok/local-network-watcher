@@ -1,0 +1,16 @@
+.egress-status{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:8px 0 14px}
+.egress-state{font-weight:600;padding:3px 10px;border:1px solid var(--line);border-radius:999px}
+.egress-state.on{border-color:currentColor}
+.egress-facts{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0 0 16px}
+.egress-facts dt{color:var(--muted)}
+.egress-facts dd{margin:0}
+.egress-form{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.egress-form input{flex:1 1 220px;min-width:0}
+.egress-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:18px}
+.egress-chip{display:inline-flex;align-items:center;gap:6px;margin:0 6px 6px 0;padding:2px 4px 2px 10px;border:1px solid var(--line);border-radius:999px}
+.egress-scroll{overflow-x:auto}
+.egress-table{width:100%;border-collapse:collapse}
+.egress-table th,.egress-table td{text-align:left;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
+.egress-table td small{display:block;color:var(--muted);white-space:normal}
+.egress-refused td:nth-child(3){font-weight:600}
+.egress-error{margin:0 0 12px;font-weight:600}

@@ -4,6 +4,7 @@ mod ai;
 mod capture;
 mod collector;
 mod control;
+mod egress;
 mod facts;
 mod geoip;
 mod history;
@@ -283,6 +284,48 @@ async fn process_control(
             error(StatusCode::BAD_REQUEST, &message)
         }
     }
+}
+
+async fn egress_status() -> Reply {
+    reply(StatusCode::OK, egress::status())
+}
+
+/// enable, pause or rule: the same Origin check as every other change, a 1 KB body.
+async fn egress_change(
+    State(s): State<AppState>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let result = match (
+        action.as_str(),
+        map.get("enabled"),
+        map.get("paused"),
+        map.get("action"),
+    ) {
+        ("enable", Some(Value::Bool(on)), _, _) => egress::set_enabled(*on).await,
+        ("pause", _, Some(Value::Bool(p)), _) => egress::set_paused(*p),
+        ("rule", _, _, Some(Value::String(a)))
+            if ["allow", "deny", "remove"].contains(&a.as_str()) =>
+        {
+            egress::change_rule(a, map.get("host").and_then(Value::as_str).unwrap_or(""))
+        }
+        _ => Err("Unknown egress change.".to_string()),
+    };
+    if let Err(message) = result {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
+    control::log_action(
+        json!({ "type": "egress", "path": format!("/api/egress/{action}"), "input": Value::Object(map) }),
+    );
+    reply(StatusCode::OK, egress::status())
 }
 
 fn query_pid(q: &HashMap<String, String>) -> u32 {
@@ -708,6 +751,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../public/process-table.css"),
     ),
     (
+        "egress-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/egress-view.js"),
+    ),
+    (
+        "egress.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/egress.css"),
+    ),
+    (
         "star-atlas.js",
         "text/javascript; charset=utf-8",
         include_bytes!("../../public/star-atlas.js"),
@@ -814,6 +867,7 @@ async fn main() {
     };
     state.caches.set_reverse_dns(settings::load_reverse_dns());
     tokio::spawn(sampler(state.clone()));
+    egress::init().await;
 
     let app = Router::new()
         .route("/api/connections", get(connections))
@@ -831,6 +885,8 @@ async fn main() {
         .route("/api/process/tree", get(process_tree))
         .route("/api/process/trust", get(process_trust))
         .route("/api/process/{action}", post(process_control))
+        .route("/api/egress", get(egress_status))
+        .route("/api/egress/{action}", post(egress_change))
         .route("/api/persistence", get(persistence))
         .route("/api/persistence/job", post(persistence_job))
         .route("/api/explain", post(explain))
