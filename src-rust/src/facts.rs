@@ -299,19 +299,6 @@ pub async fn process_facts(pid: u32) -> Option<ProcessFacts> {
     })
 }
 
-/// Parent of a process, or 0.
-pub async fn parent_of(pid: u32) -> u32 {
-    run(
-        "/bin/ps",
-        &["-o", "ppid=", "-p", &pid.to_string()],
-        Duration::from_secs(2),
-        false,
-    )
-    .await
-    .and_then(|s| s.trim().parse().ok())
-    .unwrap_or(0)
-}
-
 pub fn current_user() -> String {
     std::env::var("USER").unwrap_or_default()
 }

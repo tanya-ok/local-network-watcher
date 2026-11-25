@@ -3,6 +3,7 @@
 mod ai;
 mod capture;
 mod collector;
+mod control;
 mod facts;
 mod history;
 
@@ -234,79 +235,118 @@ async fn process(Query(q): Query<HashMap<String, String>>) -> Reply {
         .filter(|p| *p > 0);
     match pid {
         Some(pid) => match facts::process_facts(pid).await {
-            Some(f) => reply(StatusCode::OK, serde_json::to_value(f).unwrap_or_default()),
+            Some(f) => {
+                let mut v = serde_json::to_value(f).unwrap_or_default();
+                let stat = control::process_table()
+                    .await
+                    .into_iter()
+                    .find(|r| r.pid == pid)
+                    .map(|r| r.stat)
+                    .unwrap_or_default();
+                v["paused"] = Value::Bool(control::is_paused(&stat));
+                v["launchd"] = control::launchd_label(pid).await;
+                reply(StatusCode::OK, v)
+            }
             None => error(StatusCode::NOT_FOUND, "Process not found."),
         },
         None => error(StatusCode::NOT_FOUND, "Process not found."),
     }
 }
 
-/// Sends SIGTERM to a process the user owns, after an explicit confirmation in the page.
-async fn stop_process(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+/// stop, pause, resume or restart a process the user owns, after an explicit confirmation in the page.
+async fn process_control(
+    State(s): State<AppState>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
+    if !["stop", "pause", "resume", "restart"].contains(&action.as_str()) {
+        return error(StatusCode::NOT_FOUND, "Unknown process action.");
+    }
     if !same_origin(&headers, s.port) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let map = match json_body(&body, 1024) {
+    let map = match json_body(&body, 8192) {
         Ok(m) => m,
         Err(r) => return r,
     };
-    let pid = map
-        .get("pid")
-        .and_then(Value::as_u64)
-        .filter(|p| *p >= 2 && *p <= i32::MAX as u64)
-        .map(|p| p as u32);
-    let Some(pid) = pid.filter(|_| map.get("confirm") == Some(&Value::Bool(true))) else {
+    match control::control(&action, &map).await {
+        Ok(v) => reply(StatusCode::ACCEPTED, v),
+        Err(message) => {
+            control::log_action(json!({
+                "action": action, "pid": map.get("pid").cloned().unwrap_or(Value::Null),
+                "tree": map.get("tree") == Some(&Value::Bool(true)), "result": "refused", "error": message,
+            }));
+            error(StatusCode::BAD_REQUEST, &message)
+        }
+    }
+}
+
+fn query_pid(q: &HashMap<String, String>) -> u32 {
+    q.get("pid")
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+async fn process_tree(Query(q): Query<HashMap<String, String>>) -> Reply {
+    match control::tree_preview(query_pid(&q)).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+async fn process_trust(
+    State(s): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Reply {
+    let pid = query_pid(&q);
+    let path = if pid > 0 {
+        control::exe_path(pid).await
+    } else {
+        None
+    };
+    let Some(path) = path.filter(|p| p.starts_with('/')) else {
         return error(
-            StatusCode::BAD_REQUEST,
-            "Explicit confirmation and a valid process ID are required.",
+            StatusCode::NOT_FOUND,
+            "Executable path not visible for this process.",
         );
     };
-    let me = std::process::id();
-    if pid == me {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "The monitor itself cannot be stopped here.",
-        );
-    }
-    let Some(target) = facts::process_facts(pid).await else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "That process is no longer running.",
-        );
-    };
-    if target.user != facts::current_user() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Only processes owned by your current macOS account can be stopped.",
-        );
-    }
-    let mut ancestor = facts::parent_of(me).await;
-    for _ in 0..12 {
-        if ancestor <= 1 {
-            break;
-        }
-        if ancestor == pid {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "A parent process of this monitor cannot be stopped here.",
-            );
-        }
-        ancestor = facts::parent_of(ancestor).await;
-    }
-    // SAFETY: plain kill(2) with a validated pid and SIGTERM.
-    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
-        return error(StatusCode::BAD_REQUEST, "The signal could not be sent.");
-    }
-    let name = target
-        .command
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let mut facts = control::trust_facts(&path).await;
+    let app = q.get("app").map(String::as_str).unwrap_or("");
+    facts["firstSeen"] = json!(s.history.lock().await.app_first_seen(app));
+    reply(StatusCode::OK, facts)
+}
+
+async fn persistence() -> Reply {
+    let connections = collect().await.map(|s| s.connections).unwrap_or_default();
     reply(
-        StatusCode::ACCEPTED,
-        json!({ "status": "signal-sent", "signal": "SIGTERM", "pid": pid, "process": name }),
+        StatusCode::OK,
+        control::persistence_items(&connections).await,
     )
+}
+
+async fn persistence_job(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 4096) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let action = map.get("action").and_then(Value::as_str).unwrap_or("");
+    if map.get("confirm") != Some(&Value::Bool(true))
+        || !["stop", "disable", "enable"].contains(&action)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "A confirmed action of stop, disable or enable is required.",
+        );
+    }
+    let file = map.get("file").and_then(Value::as_str).unwrap_or("");
+    match control::change_job(action, file).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
 }
 
 async fn explain(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
@@ -495,6 +535,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../public/security.js"),
     ),
     (
+        "persistence-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/persistence-view.js"),
+    ),
+    (
+        "persistence.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/persistence.css"),
+    ),
+    (
         "styles.css",
         "text/css; charset=utf-8",
         include_bytes!("../../public/styles.css"),
@@ -631,7 +681,11 @@ async fn main() {
         .route("/api/names", get(names))
         .route("/api/route", get(route))
         .route("/api/process", get(process))
-        .route("/api/process/stop", post(stop_process))
+        .route("/api/process/tree", get(process_tree))
+        .route("/api/process/trust", get(process_trust))
+        .route("/api/process/{action}", post(process_control))
+        .route("/api/persistence", get(persistence))
+        .route("/api/persistence/job", post(persistence_job))
         .route("/api/explain", post(explain))
         .route("/api/models", get(models))
         .route("/api/ask", post(ask))
