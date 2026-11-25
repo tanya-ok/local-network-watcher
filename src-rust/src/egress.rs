@@ -95,7 +95,13 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { enabled: false, paused: false, allow: Vec::new(), deny: Vec::new(), ports: default_ports() }
+        Self {
+            enabled: false,
+            paused: false,
+            allow: Vec::new(),
+            deny: Vec::new(),
+            ports: default_ports(),
+        }
     }
 }
 
@@ -794,7 +800,10 @@ pub fn set_paused(paused: bool) -> Result<(), String> {
 
 pub fn change_ports(raw: &str) -> Result<(), String> {
     let mut ports = Vec::new();
-    for part in raw.split(|c: char| c == ',' || c.is_whitespace()).filter(|p| !p.is_empty()) {
+    for part in raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+    {
         match part.parse::<u16>() {
             Ok(p) if p > 0 => ports.push(p),
             _ => return Err(format!("{part} is not a port number.")),
