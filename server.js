@@ -200,7 +200,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && pathname === '/api/process/tree') {
     const pid = Number(new URL(req.url, 'http://localhost').searchParams.get('pid'));
     try {
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(await treePreview(pid)));
+      const preview = await treePreview(pid);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(preview));
     } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); }
     return;
   }
@@ -308,7 +309,8 @@ const server = createServer(async (req, res) => {
     try {
       const item = JSON.parse(body || '{}');
       if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Nothing to explain.');
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(await explain(item)));
+      const answer = await explain(item);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(answer));
     } catch (e) {
       res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message }));
     } finally {
@@ -356,7 +358,8 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'GET' && pathname === '/api/capture/interfaces') {
     try {
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(await listInterfaces()));
+      const interfaces = await listInterfaces();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(interfaces));
     } catch (e) {
       res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'TShark is not available: ' + e.message }));
     }
