@@ -36,7 +36,13 @@ This builds the release binary and installs `~/Applications/Local Network Watche
 - Reverse DNS requests use the Mac's configured resolver. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
 - “First seen” and other attention markers describe what this local baseline observed. They are investigation cues, not threat verdicts.
 - macOS may hide details for protected processes. Normal monitoring does not request administrator access.
-- A user can request SIGTERM for a same-account process after a confirmation. This may close unsaved work and does not block network access. Restart and network isolation are not implemented.
+- Process control is limited to processes owned by your macOS account, never PID 1, the monitor or its parent processes, and never uses sudo. Each action needs a confirmation dialog:
+  - Stop: SIGTERM. May close unsaved work.
+  - Stop tree: previews child processes first, then sends SIGTERM to children (deepest first) and the parent. Refused if the tree changed since the preview or contains a process of another account.
+  - Pause and resume: SIGSTOP and SIGCONT. Reversible. A paused GUI app freezes until resumed.
+  - Restart: only for launchd jobs found in `launchctl print gui/<uid>`, using `launchctl kickstart -k`. Unavailable for other processes, including GUI app instances registered by LaunchServices.
+- Every process action, including refusals, is appended as one JSON line to `actions.log` in the data folder (`LOCAL_WATCH_DATA` or `~/Library/Application Support/LocalWatch`), file mode 0600.
+- Process control does not block network access. Network isolation is not implemented.
 - This version does not enforce firewall rules or identify a connection as malicious.
 
 ## Capture
@@ -53,8 +59,8 @@ Capture runs for a configurable duration (5, 10 or 30 seconds; default 10) and s
 
 - **Map**: apps on the left, destinations on the right. Lines show live connections; after a capture their width follows captured bytes. Names can come from reverse DNS and from TLS server names seen in a capture.
 - Click a line, app or destination to open its inspector. The selected route stays highlighted while the live map refreshes.
-- **Security**: review local baseline markers, inspect a process's signature, parent chain, folder and sockets, and request SIGTERM after confirmation. Stopping a process does not block its network traffic.
-- **Map console**: guided commands for live connections, process inspection, temporary TShark capture, local model questions and stopping a process. It is not a general-purpose shell. `restart` is intentionally unavailable until the app can verify how each process should be relaunched.
+- **Security**: review local baseline markers, inspect a process's signature, parent chain, folder and sockets, and stop, stop as a tree, pause, resume or (for launchd jobs) restart it after confirmation. These actions do not block network traffic.
+- **Map console**: guided commands for live connections, process inspection, temporary TShark capture, local model questions and `stop`, `tree`, `pause`, `resume` and `restart` for a PID. It is not a general-purpose shell. `restart` works only for launchd jobs in your user domain.
 - **Flight Map**: choose one currently open connection and follow its process, socket, transport, interface, next-hop gateway and remote endpoint. Process names, socket endpoints and macOS route lookup are real local observations. Intermediate internet routers and the remote socket are outside this laptop's view. Process traffic totals are aggregate counts, not per-socket measurements. Click a stop for a plain explanation and its exact evidence.
 - **Map and Flight Map visuals**: the route plane and airport language are original reading aids. Animated paths do not claim to be packet-level traces. Packet evidence appears only after a TShark capture.
 - **Owner lookup**: selecting a destination runs `whois` for that address. This asks the public internet registry about the address.
@@ -71,3 +77,20 @@ Local Network Watcher is open source under the MIT License. Copyright and licens
 The server samples connections every 15 seconds, also while the page is closed, and learns what is normal for 24 hours. After that it marks, with one plain sentence: an app online for the first time, a new destination for an app, an unusual port, night activity (00:00 to 06:00) from an app that is rarely online then, and a sudden traffic burst. "Looks normal" silences a marker for good.
 
 History holds metadata only (app names, destination groups by reverse-DNS domain or network block, ports, times), never packet contents. It lives in `~/Library/Application Support/LocalWatch/history.json` (folder `0700`, file `0600`). Settings has a button to delete it. `LOCAL_WATCH_DATA` and `LOCAL_WATCH_LEARNING_HOURS` override the folder and the learning period.
+
+## Process trust card
+
+The Security view inspector shows a trust card for the selected process, served by `GET /api/process/trust?pid=<pid>&app=<name>`:
+
+- Code signature status, signing authority chain and Team ID from `codesign -dv --verbose=2`.
+- Gatekeeper result and notarization source from `spctl --assess --type execute -vv`.
+- Binary path, with a neutral note when it lives in `/tmp`, `/private/var/folders` or `~/Downloads`, or is unsigned or ad hoc signed.
+- First time the app name appeared in local history.
+
+Results are cached per binary path while the server runs. The card reports facts and their limits; it is not a malware verdict.
+
+## Persistence
+
+The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified; only the actions below load or unload them. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
+
+For your own LaunchAgents (`~/Library/LaunchAgents`) each card offers **Stop until next login** (`launchctl bootout`), **Stop and keep off** (`bootout` plus `launchctl disable`) and **Turn back on** (`enable` plus `bootstrap`). Every action needs a confirmation and is written to `actions.log`. Global agents and daemons in `/Library` need an administrator and are not changed; Apple jobs are never changed. For Homebrew services, `brew services stop <name>` does the same as Stop and keep off.
