@@ -84,6 +84,8 @@ Results are cached per binary path while the server runs. The card reports facts
 
 The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified, loaded or unloaded. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
 
+
+For your own LaunchAgents (`~/Library/LaunchAgents`) each card offers **Stop until next login** (`launchctl bootout`), **Stop and keep off** (`bootout` plus `launchctl disable`) and **Turn back on** (`enable` plus `bootstrap`). Every action needs a confirmation and is written to `actions.log`. Global agents and daemons in `/Library` need an administrator and are not changed; Apple jobs are never changed. For Homebrew services, `brew services stop <name>` does the same as Stop and keep off.
 ## Star Atlas and offline GeoIP
 
 The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local and multicast addresses get no location.

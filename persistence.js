@@ -3,8 +3,9 @@ import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { userDisabledLabels } from './launchd-control.js';
 
-// Read-only: plists are only parsed, never loaded, unloaded or written.
+// Plists are only parsed here; changes go through launchd-control.js.
 const exec = promisify(execFile);
 
 function scanDirs() {
@@ -52,7 +53,7 @@ async function executablePaths(pids) {
 export async function persistenceItems(connections = []) {
   const pidProcess = new Map();
   for (const c of connections) if (c.pid) pidProcess.set(Number(c.pid), c.process);
-  const [labels, paths] = await Promise.all([runningLabels(), executablePaths([...pidProcess.keys()])]);
+  const [labels, paths, offLabels] = await Promise.all([runningLabels(), executablePaths([...pidProcess.keys()]), userDisabledLabels()]);
   const pathToPid = new Map([...paths].map(([pid, path]) => [path, pid]));
   const items = [];
   const errors = [];
@@ -78,6 +79,8 @@ export async function persistenceItems(connections = []) {
         runAtLoad: plist.RunAtLoad === true,
         keepAlive: plist.KeepAlive === undefined ? false : plist.KeepAlive,
         disabled: plist.Disabled === true,
+        userDisabled: offLabels.has(label),
+        controllable: scope === 'user agent' || scope === 'custom',
         running: launchPid !== null, pid: launchPid,
         network: networkPid ? { pid: networkPid, process: pidProcess.get(networkPid) || '', matchedBy } : null,
       });

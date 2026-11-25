@@ -12,6 +12,7 @@ import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } f
 import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 import { exePath, trustFacts } from './trust.js';
 import { persistenceItems } from './persistence.js';
+import { changeJob } from './launchd-control.js';
 import { geoLookup, isNonPublic } from './geoip.js';
 
 const exec = promisify(execFile);
@@ -243,6 +244,19 @@ const server = createServer(async (req, res) => {
     if (!enabled) { nameCache.clear(); atlasNames.clear(); }
     try { saveSettings(); } catch { /* setting still applies until restart */ }
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ reverseDns: enabled }));
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/persistence/job') {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 4096) break; }
+    let input = {};
+    try { input = JSON.parse(body); } catch { /* invalid */ }
+    if (input.confirm !== true || !['stop', 'disable', 'enable'].includes(input.action)) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'A confirmed action of stop, disable or enable is required.' })); return; }
+    let out;
+    try { out = await changeJob(input.action, input.file); } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); return; }
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(out));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/home-estimate') {

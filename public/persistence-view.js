@@ -14,9 +14,23 @@
   const badges = (i) => [
     i.runAtLoad && 'starts automatically',
     i.keepAlive && (typeof i.keepAlive === 'object' ? 'restarts on conditions' : 'restarts if stopped'),
-    i.disabled && 'disabled',
+    i.disabled && 'disabled in plist',
+    i.userDisabled && 'turned off by you',
   ].filter(Boolean).map((b) => `<span class="pers-badge">${esc(b)}</span>`).join('');
-  const card = (i) => `<details class="pers-card${i.network ? ' pers-online' : ''}"><summary><span class="pers-dot"></span><span class="pers-name"><strong>${esc(base(i.program) || i.label)}</strong><small>${esc(vendor(i.label) || i.label)}</small></span><span class="pers-where">${esc(where(i))}</span><span class="pers-badges">${badges(i)}</span>${i.network ? `<span class="pers-net">online as ${esc(i.network.process)} · PID ${esc(i.network.pid)}</span>` : i.running ? `<span class="pers-run">running · PID ${esc(i.pid)}</span>` : ''}</summary><dl><dt>Label</dt><dd>${esc(i.label)}</dd><dt>Program</dt><dd>${esc([i.program, ...(i.arguments || []).slice(1)].join(' ') || 'not set')}</dd><dt>Plist</dt><dd>${(i.files || [i.file]).map(esc).join('<br>')}</dd>${i.network ? `<dt>Matched by</dt><dd>${esc(i.network.matchedBy)}</dd>` : ''}</dl>${i.network ? `<button class="text-button pers-map" type="button" data-app="${esc(i.network.process)}">Show on Map</button>` : ''}</details>`;
+  const card = (i) => `<details class="pers-card${i.network ? ' pers-online' : ''}"><summary><span class="pers-dot"></span><span class="pers-name"><strong>${esc(base(i.program) || i.label)}</strong><small>${esc(vendor(i.label) || i.label)}</small></span><span class="pers-where">${esc(where(i))}</span><span class="pers-badges">${badges(i)}</span>${i.network ? `<span class="pers-net">online as ${esc(i.network.process)} · PID ${esc(i.network.pid)}</span>` : i.running ? `<span class="pers-run">running · PID ${esc(i.pid)}</span>` : ''}</summary><dl><dt>Label</dt><dd>${esc(i.label)}</dd><dt>Program</dt><dd>${esc([i.program, ...(i.arguments || []).slice(1)].join(' ') || 'not set')}</dd><dt>Plist</dt><dd>${(i.files || [i.file]).map(esc).join('<br>')}</dd>${i.network ? `<dt>Matched by</dt><dd>${esc(i.network.matchedBy)}</dd>` : ''}</dl><div class="pers-actions">${i.network ? `<button class="text-button pers-map" type="button" data-app="${esc(i.network.process)}">Show on Map</button>` : ''}${controls(i)}</div></details>`;
+  const controls = (i) => {
+    if (i.apple) return '';
+    if (!i.controllable) return '<span class="pers-hint">Installed for all users. Changing it needs an administrator, so it is not changed here.</span>';
+    const btn = (action, text) => `<button class="text-button pers-act" type="button" data-action="${action}" data-file="${esc(i.file)}" data-name="${esc(base(i.program) || i.label)}">${esc(text)}</button>`;
+    return i.userDisabled || !i.running
+      ? (i.userDisabled ? btn('enable', 'Turn back on') : btn('enable', 'Start now'))
+      : `${btn('stop', 'Stop until next login')}${btn('disable', 'Stop and keep off')}`;
+  };
+  const confirmText = {
+    stop: (n) => `Stop ${n} now?\n\nlaunchd unloads the job, so it is not restarted. It starts again at your next login.`,
+    disable: (n) => `Stop ${n} and keep it off?\n\nlaunchd unloads the job and marks it disabled, so it stays off after login. You can turn it back on here.`,
+    enable: (n) => `Turn ${n} back on?\n\nlaunchd enables and loads the job again.`,
+  };
   const group = (title, hint, list) => list.length ? `<section class="pers-group"><h3>${esc(title)} <small>${list.length}</small></h3><p class="pers-hint">${esc(hint)}</p>${list.map(card).join('')}</section>` : '';
   function render() {
     const q = search.value.trim().toLowerCase();
@@ -49,7 +63,19 @@
     } catch { if (mine === seq) note.textContent = 'Persistence data is unavailable.'; }
   }
   search.addEventListener('input', render);
-  root.addEventListener('click', (e) => {
+  root.addEventListener('click', async (e) => {
+    const act = e.target.closest('.pers-act');
+    if (act) {
+      if (!window.confirm(confirmText[act.dataset.action](act.dataset.name))) return;
+      act.disabled = true;
+      try {
+        const res = await fetch('/api/persistence/job', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: act.dataset.action, file: act.dataset.file, confirm: true }) });
+        const out = await res.json();
+        note.textContent = res.ok ? `${act.dataset.name}: ${out.result === 'ok' ? 'done' : `done with notes: ${out.notes.join('; ')}`}. Logged to actions.log.` : `${act.dataset.name}: ${out.error}`;
+      } catch { note.textContent = 'The local server did not answer.'; }
+      setTimeout(load, 800);
+      return;
+    }
     const b = e.target.closest('.pers-map');
     if (!b) return;
     location.hash = '#map';
