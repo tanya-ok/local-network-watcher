@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } from './process-control.js';
 import { accept, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 
 const exec = promisify(execFile);
@@ -160,6 +161,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && pathname === '/api/process') {
     const pid = Number(new URL(req.url, 'http://localhost').searchParams.get('pid'));
     const facts = Number.isInteger(pid) && pid > 0 ? await processFacts(pid) : null;
+    if (facts) {
+      const row = (await processTable()).find((r) => r.pid === pid);
+      facts.paused = isPaused(row?.stat);
+      facts.launchd = await launchdLabel(pid);
+    }
     res.writeHead(facts ? 200 : 404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(facts || { error: 'Process not found.' }));
     return;
   }
@@ -173,28 +179,58 @@ const server = createServer(async (req, res) => {
     } catch { res.writeHead(503, { 'content-type':'application/json; charset=utf-8' }).end(JSON.stringify({ error:'macOS route information is unavailable for this endpoint.' })); }
     return;
   }
-  if (req.method === 'POST' && pathname === '/api/process/stop') {
+  if (req.method === 'GET' && pathname === '/api/process/tree') {
+    const pid = Number(new URL(req.url, 'http://localhost').searchParams.get('pid'));
+    try {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(await treePreview(pid)));
+    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+  const control = pathname.match(/^\/api\/process\/(stop|pause|resume|restart)$/)?.[1];
+  if (req.method === 'POST' && control) {
     const origin = req.headers.origin || '';
     if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) { res.writeHead(403).end(); return; }
     let body = '';
-    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    for await (const chunk of req) { body += chunk; if (body.length > 8192) break; }
+    let request = {};
+    const json = (code, data) => res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     try {
-      const { pid, confirm } = JSON.parse(body || '{}');
+      request = JSON.parse(body || '{}');
+      const { pid, confirm, tree, children } = request;
       if (confirm !== true || !Number.isSafeInteger(pid) || pid < 2) throw new Error('Explicit confirmation and a valid process ID are required.');
-      if (pid === process.pid || pid === process.ppid) throw new Error('The monitor itself cannot be stopped here.');
-      const facts = await processFacts(pid);
-      if (!facts) throw new Error('That process is no longer running.');
-      const me = (await exec('/usr/bin/id', ['-un'])).stdout.trim();
-      if (facts.user !== me) throw new Error('Only processes owned by your current macOS account can be stopped.');
-      let ancestor = process.ppid;
-      for (let i = 0; i < 12 && ancestor > 1; i++) {
-        if (ancestor === pid) throw new Error('A parent process of this monitor cannot be stopped here.');
-        const row = (await exec('/bin/ps', ['-o', 'ppid=', '-p', String(ancestor)])).stdout.trim();
-        ancestor = Number(row) || 0;
+      const verb = { stop: 'stopped', pause: 'paused', resume: 'resumed', restart: 'restarted' }[control];
+      const { row } = await guard(pid, verb);
+      const name = row.command.split(' ')[0];
+      if (control === 'stop' && tree === true) {
+        const preview = await treePreview(pid);
+        if (preview.refused.length) throw new Error(`The tree contains ${preview.refused.length} process(es) that cannot be stopped here (another account or the monitor itself).`);
+        const now = preview.children.map((c) => c.pid).sort((a, b) => a - b);
+        const seen = Array.isArray(children) ? [...children].sort((a, b) => a - b) : null;
+        if (!seen || seen.join(',') !== now.join(',')) throw new Error('The process tree changed since the preview. Preview it again before stopping.');
+        const signalled = [];
+        for (const c of preview.children) { try { process.kill(c.pid, 'SIGTERM'); signalled.push(c.pid); } catch { /* already exited */ } }
+        process.kill(pid, 'SIGTERM');
+        signalled.push(pid);
+        await logAction({ action: 'stop-tree', signal: 'SIGTERM', pid, process: name, pids: signalled, result: 'signal-sent' });
+        json(202, { status: 'signal-sent', signal: 'SIGTERM', pid, process: name, pids: signalled });
+        return;
       }
-      process.kill(pid, 'SIGTERM');
-      res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'signal-sent', signal: 'SIGTERM', pid, process: facts.command.split(' ')[0] }));
-    } catch (e) { res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: e.message })); }
+      if (control === 'restart') {
+        const lookup = await launchdLabel(pid);
+        if (!lookup.managed) throw new Error(`Restart unavailable: ${lookup.reason}`);
+        await exec('/bin/launchctl', ['kickstart', '-k', lookup.target], { timeout: 10000 });
+        await logAction({ action: 'restart', pid, process: name, label: lookup.label, target: lookup.target, result: 'kickstarted' });
+        json(202, { status: 'kickstarted', pid, process: name, label: lookup.label });
+        return;
+      }
+      const signal = { stop: 'SIGTERM', pause: 'SIGSTOP', resume: 'SIGCONT' }[control];
+      process.kill(pid, signal);
+      await logAction({ action: control, signal, pid, process: name, result: 'signal-sent' });
+      json(202, { status: 'signal-sent', signal, pid, process: name });
+    } catch (e) {
+      await logAction({ action: control, pid: request.pid ?? null, tree: request.tree === true, result: 'refused', error: e.message });
+      json(400, { error: e.message });
+    }
     return;
   }
   if (req.method === 'GET' && pathname === '/api/markers') {
