@@ -1,7 +1,10 @@
 //! Optional loopback proxy with two profiles and one policy file: "open" passes everything except the deny lists, "strict" passes only the allow list.
 
+use crate::approval::{self, Approvals, Change, Submit};
 use crate::control::{data_dir, iso_now};
+use crate::dns;
 use crate::geoip::is_non_public;
+use crate::peer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -120,7 +123,10 @@ fn verdict(allow: bool, reason: impl Into<String>) -> Verdict {
 
 #[derive(Serialize, Clone)]
 struct Entry {
+    kind: &'static str,
     time: String,
+    uid: u32,
+    user: String,
     profile: &'static str,
     method: String,
     host: String,
@@ -152,6 +158,9 @@ struct Inner {
     errors: HashMap<&'static str, String>,
     recent: VecDeque<Entry>,
     hosts: HashMap<String, HostStat>,
+    approvals: Approvals,
+    dns: VecDeque<dns::Query>,
+    dns_seen: bool,
 }
 
 struct Egress {
@@ -187,12 +196,23 @@ pub fn profiles() -> [(&'static str, u16); 2] {
     ]
 }
 
+static DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The daemon keeps its own data dir; the app keeps the shared one.
+pub fn set_dir(dir: PathBuf) {
+    let _ = DIR.set(dir);
+}
+
+fn dir() -> PathBuf {
+    DIR.get().cloned().unwrap_or_else(data_dir)
+}
+
 fn rules_file() -> PathBuf {
-    data_dir().join("egress.json")
+    dir().join("egress.json")
 }
 
 pub fn log_file() -> PathBuf {
-    data_dir().join("egress.log")
+    dir().join("egress.log")
 }
 
 pub fn clean_host(h: &str) -> String {
@@ -323,8 +343,9 @@ fn load() -> Policy {
     p
 }
 
-fn private_dir() -> std::io::Result<PathBuf> {
-    let dir = data_dir();
+/// Creates the data dir with mode 0700 if needed.
+pub fn private_dir() -> std::io::Result<PathBuf> {
+    let dir = dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     Ok(dir)
@@ -367,7 +388,7 @@ fn rotate_log() -> std::io::Result<()> {
     std::fs::rename(&log, numbered(1))
 }
 
-fn append_log(entry: &Entry) {
+fn append_log<T: Serialize>(entry: &T) {
     let _ = (|| -> std::io::Result<()> {
         private_dir()?;
         rotate_log()?;
@@ -599,9 +620,18 @@ async fn pipe(
     (sent.into_inner(), received.into_inner())
 }
 
-fn entry(profile: &'static str, head: Option<&Head>, method: &str, v: &Verdict) -> Entry {
+fn entry(
+    profile: &'static str,
+    who: &(u32, String),
+    head: Option<&Head>,
+    method: &str,
+    v: &Verdict,
+) -> Entry {
     Entry {
+        kind: "proxy",
         time: iso_now(),
+        uid: who.0,
+        user: who.1.clone(),
         profile,
         method: method.to_string(),
         host: head.map_or("invalid".into(), |h| h.host.clone()),
@@ -624,7 +654,7 @@ const HOP: &[&str] = &[
     "upgrade",
 ];
 
-async fn handle(profile: &'static str, mut client: TcpStream) {
+async fn handle(profile: &'static str, mut client: TcpStream, who: (u32, String)) {
     let epoch = global().epoch.subscribe();
     let Ok(Some((raw, leftover))) =
         tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client)).await
@@ -648,13 +678,13 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
             },
         );
         refuse(&mut client, 400, &v.reason).await;
-        record(entry(profile, None, &method, &v));
+        record(entry(profile, &who, None, &method, &v));
         return;
     };
     let v = decide(&lock().policy, &head.host, head.port, profile);
     if !v.allow {
         refuse(&mut client, 403, &v.reason).await;
-        record(entry(profile, Some(&head), &head.method, &v));
+        record(entry(profile, &who, Some(&head), &head.method, &v));
         return;
     }
     let address = match target(&head.host, head.port).await {
@@ -662,13 +692,13 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
         Ok(None) => {
             let v = verdict(false, "local or unresolved address");
             refuse(&mut client, 403, &v.reason).await;
-            record(entry(profile, Some(&head), &head.method, &v));
+            record(entry(profile, &who, Some(&head), &head.method, &v));
             return;
         }
         Err(()) => {
             let v = verdict(false, "name could not be resolved");
             refuse(&mut client, 502, &v.reason).await;
-            record(entry(profile, Some(&head), &head.method, &v));
+            record(entry(profile, &who, Some(&head), &head.method, &v));
             return;
         }
     };
@@ -677,7 +707,7 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
         _ => {
             let v = verdict(false, "destination did not answer");
             refuse(&mut client, 502, &v.reason).await;
-            record(entry(profile, Some(&head), &head.method, &v));
+            record(entry(profile, &who, Some(&head), &head.method, &v));
             return;
         }
     };
@@ -711,7 +741,7 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
     if !first.is_empty() && upstream.write_all(&first).await.is_err() {
         return;
     }
-    let mut e = entry(profile, Some(&head), &head.method, &v);
+    let mut e = entry(profile, &who, Some(&head), &head.method, &v);
     (e.sent, e.received) = pipe(client, upstream, epoch, first.len() as u64).await;
     record(e);
 }
@@ -719,8 +749,16 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
 async fn accept_loop(profile: &'static str, listener: TcpListener) {
     loop {
         match listener.accept().await {
-            Ok((socket, _)) => {
-                tokio::spawn(handle(profile, socket));
+            Ok((socket, peer_addr)) => {
+                // Looked up while the client still waits for an answer, so its socket is in the table.
+                let server = socket.local_addr();
+                tokio::spawn(async move {
+                    let who = match server {
+                        Ok(server) => client_account(peer_addr, server).await,
+                        Err(_) => (peer::UNKNOWN_UID, "unknown".into()),
+                    };
+                    handle(profile, socket, who).await;
+                });
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
@@ -763,6 +801,118 @@ fn stop() {
     global().epoch.send_modify(|n| *n += 1);
 }
 
+/// uid and account name of the process behind a loopback TCP client.
+pub async fn client_account(client: SocketAddr, server: SocketAddr) -> (u32, String) {
+    tokio::task::spawn_blocking(move || {
+        let uid = peer::tcp_client_uid(client, server);
+        (uid, peer::user_name(uid))
+    })
+    .await
+    .unwrap_or((peer::UNKNOWN_UID, "unknown".into()))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn journal_change(event: &str, uid: u32, user: &str, id: &str, change: &Change) {
+    append_log(&json!({
+        "kind": "change", "time": iso_now(), "event": event,
+        "uid": uid, "user": user, "id": id, "change": change,
+    }));
+}
+
+fn expire_pending() {
+    let gone = lock().approvals.expire(now_secs());
+    for p in gone {
+        journal_change("expired", p.uid, &p.user, &p.id, &p.change);
+    }
+}
+
+async fn apply(change: &Change) -> Result<(), String> {
+    match change {
+        Change::Enable { enabled } => set_enabled(*enabled).await,
+        Change::Pause { paused } => set_paused(*paused),
+        Change::Rule { rule, host } => change_rule(rule, host),
+        Change::Ports { ports } => change_ports(ports),
+    }
+}
+
+/// Checks a change without applying it, so a bad value fails now rather than at approval.
+fn validate(change: &Change) -> Result<(), String> {
+    match change {
+        Change::Rule { host, .. } if !valid_rule(&clean_host(host)) => {
+            Err("Enter a domain such as example.com, or a public IP address.".into())
+        }
+        Change::Ports { ports } => parse_ports(ports).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+/// The single entry point for changes: admin uids apply at once, everyone else gets a pending id.
+pub async fn request(uid: u32, change: Change) -> Result<Value, String> {
+    expire_pending();
+    validate(&change)?;
+    let user = peer::user_name(uid);
+    let admin = approval::load_admins(&dir()).contains(uid);
+    let id = approval::new_id();
+    let outcome = lock().approvals.submit(
+        now_secs(),
+        approval::ttl(),
+        (uid, user.clone()),
+        admin,
+        change.clone(),
+        id,
+    )?;
+    match outcome {
+        Submit::Apply => {
+            apply(&change).await?;
+            journal_change("applied", uid, &user, "", &change);
+            Ok(json!({ "outcome": "applied" }))
+        }
+        Submit::Queued(id) => {
+            journal_change("pending", uid, &user, &id, &change);
+            Ok(json!({ "outcome": "pending", "pendingId": id }))
+        }
+    }
+}
+
+/// Approves or denies a pending change; the caller must be on the admin list.
+pub async fn resolve(uid: u32, id: &str, approve: bool) -> Result<Value, String> {
+    expire_pending();
+    let user = peer::user_name(uid);
+    let admin = approval::load_admins(&dir()).contains(uid);
+    let p = lock().approvals.resolve(now_secs(), admin, id)?;
+    if approve {
+        apply(&p.change).await?;
+    }
+    let event = if approve { "approved" } else { "denied" };
+    append_log(&json!({
+        "kind": "change", "time": iso_now(), "event": event, "id": p.id,
+        "uid": uid, "user": user, "requestedBy": { "uid": p.uid, "user": p.user },
+        "change": p.change,
+    }));
+    Ok(json!({ "outcome": event }))
+}
+
+/// Starts following the pflog DNS log and keeps the last queries for the view.
+pub fn start_dns() {
+    tokio::spawn(dns::follow(
+        |q| {
+            append_log(&json!({ "kind": "dns", "via": "resolver, not proxied", "query": q }));
+            let mut g = lock();
+            g.dns.push_back(q);
+            while g.dns.len() > RECENT {
+                g.dns.pop_front();
+            }
+        },
+        |seen| lock().dns_seen = seen,
+    ));
+}
+
 pub async fn init() {
     let mut policy = load();
     if std::env::var("LOCAL_WATCH_EGRESS").as_deref() == Ok("1") {
@@ -798,7 +948,7 @@ pub fn set_paused(paused: bool) -> Result<(), String> {
     result
 }
 
-pub fn change_ports(raw: &str) -> Result<(), String> {
+fn parse_ports(raw: &str) -> Result<Vec<u16>, String> {
     let mut ports = Vec::new();
     for part in raw
         .split(|c: char| c == ',' || c.is_whitespace())
@@ -814,6 +964,11 @@ pub fn change_ports(raw: &str) -> Result<(), String> {
     }
     ports.sort_unstable();
     ports.dedup();
+    Ok(ports)
+}
+
+pub fn change_ports(raw: &str) -> Result<(), String> {
+    let ports = parse_ports(raw)?;
     let mut g = lock();
     g.policy.ports = ports;
     save(&g.policy)
@@ -838,6 +993,8 @@ pub fn change_rule(action: &str, raw: &str) -> Result<(), String> {
 }
 
 pub fn status() -> Value {
+    expire_pending();
+    let admins = approval::load_admins(&dir()).describe();
     let g = lock();
     let ports = profiles();
     let mut hosts: Vec<&HostStat> = g.hosts.values().collect();
@@ -856,6 +1013,13 @@ pub fn status() -> Value {
         "recent": recent,
         "log": log_file().to_string_lossy(),
         "errors": g.errors,
+        "pending": g.approvals.list(),
+        "admins": admins,
+        "dns": {
+            "visible": g.dns_seen,
+            "log": dns::log_path().to_string_lossy(),
+            "recent": g.dns.iter().rev().take(100).collect::<Vec<_>>(),
+        },
     })
 }
 

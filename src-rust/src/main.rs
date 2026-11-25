@@ -1,13 +1,17 @@
 //! Local Network Watcher: one binary that collects, serves the page and answers its API on 127.0.0.1.
 
 mod ai;
+mod approval;
 mod capture;
 mod collector;
 mod control;
+mod daemon;
+mod dns;
 mod egress;
 mod facts;
 mod geoip;
 mod history;
+mod peer;
 mod settings;
 
 use axum::body::Bytes;
@@ -31,6 +35,8 @@ struct AppState {
     caches: Arc<facts::Caches>,
     capture: capture::Capture,
     explaining: Arc<AtomicBool>,
+    /// The egress proxy runs in the system daemon; this app only forwards to its socket.
+    egress_remote: bool,
 }
 
 type Reply = Response;
@@ -286,13 +292,25 @@ async fn process_control(
     }
 }
 
-async fn egress_status() -> Reply {
-    reply(StatusCode::OK, egress::status())
+async fn egress_status(State(s): State<AppState>) -> Reply {
+    if !s.egress_remote {
+        let mut st = egress::status();
+        st["mode"] = json!("in-process");
+        return reply(StatusCode::OK, st);
+    }
+    match daemon::call(json!({ "op": "status" })).await {
+        Ok(r) => reply(StatusCode::OK, r["status"].clone()),
+        Err(e) => reply(
+            StatusCode::BAD_GATEWAY,
+            json!({ "mode": "daemon", "unreachable": true, "error": e }),
+        ),
+    }
 }
 
-/// enable, pause or rule: the same Origin check as every other change, a 1 KB body.
+/// enable, pause, rule, ports, approve, deny. The Origin check only stops other web pages; who may change rules is decided from the kernel uid of the TCP client.
 async fn egress_change(
     State(s): State<AppState>,
+    axum::extract::ConnectInfo(client): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::extract::Path(action): axum::extract::Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -304,31 +322,60 @@ async fn egress_change(
         Ok(m) => m,
         Err(r) => return r,
     };
-    let result = match (
-        action.as_str(),
-        map.get("enabled"),
-        map.get("paused"),
-        map.get("action"),
-    ) {
-        ("enable", Some(Value::Bool(on)), _, _) => egress::set_enabled(*on).await,
-        ("pause", _, Some(Value::Bool(p)), _) => egress::set_paused(*p),
-        ("rule", _, _, Some(Value::String(a)))
-            if ["allow", "deny", "remove"].contains(&a.as_str()) =>
-        {
-            egress::change_rule(a, map.get("host").and_then(Value::as_str).unwrap_or(""))
+    let server = std::net::SocketAddr::from(([127, 0, 0, 1], s.port));
+    let (uid, user) = egress::client_account(client, server).await;
+    let id = map
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let resolve = matches!(action.as_str(), "approve" | "deny");
+    let (result, status) = if s.egress_remote {
+        let mut req = if resolve {
+            json!({ "op": action, "id": id })
+        } else {
+            json!({ "op": "change", "action": action, "input": Value::Object(map.clone()) })
+        };
+        if uid == peer::UNKNOWN_UID {
+            req["forClient"] = json!({ "port": client.port(), "serverPort": s.port });
+        } else {
+            req["forUid"] = json!(uid);
         }
-        ("ports", _, _, _) => {
-            egress::change_ports(map.get("ports").and_then(Value::as_str).unwrap_or(""))
+        match daemon::call(req).await {
+            Ok(r) if r["ok"] == json!(true) => (Ok(r["result"].clone()), r["status"].clone()),
+            Ok(r) => (
+                Err(r["error"]
+                    .as_str()
+                    .unwrap_or("The change was not applied.")
+                    .to_string()),
+                Value::Null,
+            ),
+            Err(e) => (Err(e), Value::Null),
         }
-        _ => Err("Unknown egress change.".to_string()),
+    } else {
+        let result = if resolve {
+            egress::resolve(uid, &id, action == "approve").await
+        } else {
+            match approval::Change::parse(&action, &map) {
+                Ok(c) => egress::request(uid, c).await,
+                Err(e) => Err(e),
+            }
+        };
+        let mut st = egress::status();
+        st["mode"] = json!("in-process");
+        (result, st)
     };
-    if let Err(message) = result {
-        return error(StatusCode::BAD_REQUEST, &message);
-    }
-    control::log_action(
-        json!({ "type": "egress", "path": format!("/api/egress/{action}"), "input": Value::Object(map) }),
-    );
-    reply(StatusCode::OK, egress::status())
+    let outcome = match result {
+        Ok(o) => o,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    control::log_action(json!({
+        "type": "egress", "path": format!("/api/egress/{action}"), "input": Value::Object(map),
+        "client": { "uid": uid, "user": user }, "outcome": outcome,
+    }));
+    let mut status = status;
+    status["outcome"] = outcome;
+    reply(StatusCode::OK, status)
 }
 
 fn query_pid(q: &HashMap<String, String>) -> u32 {
@@ -847,6 +894,15 @@ async fn main() {
         eprintln!("Local Network Watcher reads macOS network activity only.");
         std::process::exit(2);
     }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("egress-daemon") => {
+            daemon::run().await;
+            return;
+        }
+        Some("egress") => std::process::exit(daemon::cli(&args[1..]).await),
+        _ => {}
+    }
     if std::env::args().any(|a| a == "--snapshot") {
         match collector::snapshot() {
             Ok(s) => println!("{}", serde_json::to_string(&s).unwrap_or_default()),
@@ -867,10 +923,18 @@ async fn main() {
         caches: Arc::new(facts::Caches::default()),
         capture: capture::Capture::new(),
         explaining: Arc::new(AtomicBool::new(false)),
+        egress_remote: daemon::available(),
     };
     state.caches.set_reverse_dns(settings::load_reverse_dns());
     tokio::spawn(sampler(state.clone()));
-    egress::init().await;
+    if state.egress_remote {
+        println!(
+            "Egress runs in the system daemon at {}; local proxy listeners stay off.",
+            daemon::socket_path().display()
+        );
+    } else {
+        egress::init().await;
+    }
 
     let app = Router::new()
         .route("/api/connections", get(connections))
@@ -916,9 +980,12 @@ async fn main() {
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
     {
         eprintln!("Server stopped: {e}");
     }
