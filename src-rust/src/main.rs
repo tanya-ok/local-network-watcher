@@ -317,6 +317,9 @@ async fn egress_change(
         {
             egress::change_rule(a, map.get("host").and_then(Value::as_str).unwrap_or(""))
         }
+        ("ports", _, _, _) => {
+            egress::change_ports(map.get("ports").and_then(Value::as_str).unwrap_or(""))
+        }
         _ => Err("Unknown egress change.".to_string()),
     };
     if let Err(message) = result {

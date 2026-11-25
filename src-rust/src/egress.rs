@@ -71,8 +71,14 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const RECENT: usize = 500;
 const HOSTS: usize = 2000;
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_KEEP: u32 = 3;
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+fn default_ports() -> Vec<u16> {
+    vec![80, 443]
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Policy {
     #[serde(default)]
     pub enabled: bool,
@@ -82,6 +88,15 @@ pub struct Policy {
     pub allow: Vec<String>,
     #[serde(default)]
     pub deny: Vec<String>,
+    /// Destination ports the proxy may reach; everything else is refused.
+    #[serde(default = "default_ports")]
+    pub ports: Vec<u16>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self { enabled: false, paused: false, allow: Vec::new(), deny: Vec::new(), ports: default_ports() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,9 +220,30 @@ fn matches<'a, I: IntoIterator<Item = &'a str>>(host: &str, list: I) -> Option<&
     })
 }
 
-pub fn decide(policy: &Policy, host: &str, profile: &str) -> Verdict {
+/// A rule entry: a domain, or a public IP literal for direct-address requests.
+pub fn valid_rule(h: &str) -> bool {
+    match h.parse::<IpAddr>() {
+        Ok(ip) => !blocked_address(ip),
+        Err(_) => valid_host(h),
+    }
+}
+
+pub fn decide(policy: &Policy, host: &str, port: u16, profile: &str) -> Verdict {
     if policy.paused {
         return verdict(false, "all traffic paused");
+    }
+    if !policy.ports.contains(&port) {
+        return verdict(false, format!("port {port} is not on the allowed ports"));
+    }
+    // Domain lists cannot judge a bare address, so a direct IP needs its own explicit rule.
+    if host.parse::<IpAddr>().is_ok() {
+        if policy.deny.iter().any(|d| d == host) {
+            return verdict(false, format!("blocked by you ({host})"));
+        }
+        if policy.allow.iter().any(|d| d == host) {
+            return verdict(true, format!("allowed by you ({host})"));
+        }
+        return verdict(false, "direct IP address; allow it by address to use it");
     }
     if let Some(d) = matches(host, policy.deny.iter().map(String::as_str)) {
         return verdict(false, format!("blocked by you ({d})"));
@@ -267,7 +303,7 @@ fn load() -> Policy {
         let mut v: Vec<String> = v
             .iter()
             .map(|h| clean_host(h))
-            .filter(|h| valid_host(h))
+            .filter(|h| valid_rule(h))
             .collect();
         v.sort();
         v.dedup();
@@ -275,6 +311,9 @@ fn load() -> Policy {
     };
     p.allow = tidy(p.allow);
     p.deny = tidy(p.deny);
+    p.ports.retain(|port| *port != 0);
+    p.ports.sort_unstable();
+    p.ports.dedup();
     p
 }
 
@@ -308,9 +347,24 @@ fn save(policy: &Policy) -> Result<(), String> {
     write().map_err(|e| format!("The egress policy could not be saved: {e}"))
 }
 
+/// Keeps egress.log under LOG_MAX_BYTES by shifting it to egress.log.1 .. egress.log.LOG_KEEP.
+fn rotate_log() -> std::io::Result<()> {
+    let log = log_file();
+    if std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0) < LOG_MAX_BYTES {
+        return Ok(());
+    }
+    let numbered = |n: u32| PathBuf::from(format!("{}.{n}", log.to_string_lossy()));
+    let _ = std::fs::remove_file(numbered(LOG_KEEP));
+    for n in (1..LOG_KEEP).rev() {
+        let _ = std::fs::rename(numbered(n), numbered(n + 1));
+    }
+    std::fs::rename(&log, numbered(1))
+}
+
 fn append_log(entry: &Entry) {
     let _ = (|| -> std::io::Result<()> {
         private_dir()?;
+        rotate_log()?;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -591,7 +645,7 @@ async fn handle(profile: &'static str, mut client: TcpStream) {
         record(entry(profile, None, &method, &v));
         return;
     };
-    let v = decide(&lock().policy, &head.host, profile);
+    let v = decide(&lock().policy, &head.host, head.port, profile);
     if !v.allow {
         refuse(&mut client, 403, &v.reason).await;
         record(entry(profile, Some(&head), &head.method, &v));
@@ -738,10 +792,28 @@ pub fn set_paused(paused: bool) -> Result<(), String> {
     result
 }
 
+pub fn change_ports(raw: &str) -> Result<(), String> {
+    let mut ports = Vec::new();
+    for part in raw.split(|c: char| c == ',' || c.is_whitespace()).filter(|p| !p.is_empty()) {
+        match part.parse::<u16>() {
+            Ok(p) if p > 0 => ports.push(p),
+            _ => return Err(format!("{part} is not a port number.")),
+        }
+    }
+    if ports.is_empty() {
+        return Err("Keep at least one port, for example 443.".into());
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    let mut g = lock();
+    g.policy.ports = ports;
+    save(&g.policy)
+}
+
 pub fn change_rule(action: &str, raw: &str) -> Result<(), String> {
     let host = clean_host(raw);
-    if !valid_host(&host) {
-        return Err("Enter a domain such as example.com.".into());
+    if !valid_rule(&host) {
+        return Err("Enter a domain such as example.com, or a public IP address.".into());
     }
     let mut g = lock();
     g.policy.allow.retain(|h| *h != host);
@@ -769,6 +841,7 @@ pub fn status() -> Value {
         "ports": { "open": ports[0].1, "strict": ports[1].1 },
         "allow": g.policy.allow,
         "deny": g.policy.deny,
+        "allowedPorts": g.policy.ports,
         "builtin": { "ai": AI.len(), "tracker": TRACKER.len() },
         "hosts": hosts,
         "recent": recent,
@@ -787,6 +860,7 @@ mod tests {
             paused,
             allow: allow.iter().map(|s| s.to_string()).collect(),
             deny: deny.iter().map(|s| s.to_string()).collect(),
+            ports: default_ports(),
         }
     }
 
@@ -794,23 +868,23 @@ mod tests {
     fn open_and_strict() {
         let p = policy(&["example.org"], &[], false);
         assert_eq!(
-            decide(&p, "example.com", "open"),
+            decide(&p, "example.com", 443, "open"),
             verdict(true, "open profile")
         );
         assert_eq!(
-            decide(&p, "example.com", "strict"),
+            decide(&p, "example.com", 443, "strict"),
             verdict(false, "not on the allow list")
         );
         assert_eq!(
-            decide(&p, "www.example.org", "strict"),
+            decide(&p, "www.example.org", 443, "strict"),
             verdict(true, "allowed by you (example.org)")
         );
         assert_eq!(
-            decide(&p, "example.org", "open"),
+            decide(&p, "example.org", 443, "open"),
             verdict(true, "allowed by you (example.org)")
         );
         assert!(
-            !decide(&p, "badexample.org", "strict").allow,
+            !decide(&p, "badexample.org", 443, "strict").allow,
             "suffix must be on a label boundary"
         );
     }
@@ -819,22 +893,22 @@ mod tests {
     fn deny_lists_win() {
         let p = policy(&["openai.com", "blocked.net"], &["blocked.net"], false);
         assert_eq!(
-            decide(&p, "a.blocked.net", "open"),
+            decide(&p, "a.blocked.net", 443, "open"),
             verdict(false, "blocked by you (blocked.net)")
         );
         assert_eq!(
-            decide(&p, "api.openai.com", "strict"),
+            decide(&p, "api.openai.com", 443, "strict"),
             verdict(false, "hosted AI service (openai.com)")
         );
         assert_eq!(
-            decide(&p, "claude.ai", "open"),
+            decide(&p, "claude.ai", 443, "open"),
             verdict(false, "hosted AI service (claude.ai)")
         );
         assert_eq!(
-            decide(&p, "www.google-analytics.com", "open"),
+            decide(&p, "www.google-analytics.com", 443, "open"),
             verdict(false, "tracker (google-analytics.com)")
         );
-        assert!(decide(&p, "notopenai.com", "open").allow);
+        assert!(decide(&p, "notopenai.com", 443, "open").allow);
     }
 
     #[test]
@@ -842,7 +916,7 @@ mod tests {
         let p = policy(&["example.com"], &[], true);
         for profile in ["open", "strict"] {
             assert_eq!(
-                decide(&p, "example.com", profile),
+                decide(&p, "example.com", 443, profile),
                 verdict(false, "all traffic paused")
             );
         }
@@ -918,5 +992,19 @@ mod tests {
         ] {
             assert!(parse_head(bad).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn ports_and_direct_addresses() {
+        let p = policy(&["93.184.215.14"], &["1.1.1.1"], false);
+        assert!(!decide(&p, "example.com", 22, "open").allow);
+        assert!(!decide(&p, "example.com", 25, "open").allow);
+        assert!(decide(&p, "example.com", 80, "open").allow);
+        assert!(decide(&p, "93.184.215.14", 443, "strict").allow);
+        assert!(!decide(&p, "1.1.1.1", 443, "open").allow);
+        assert!(!decide(&p, "8.8.8.8", 443, "open").allow);
+        assert!(valid_rule("8.8.8.8"));
+        assert!(!valid_rule("127.0.0.1"));
+        assert!(!valid_rule("192.168.1.1"));
     }
 }
