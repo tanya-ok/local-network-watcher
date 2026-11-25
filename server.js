@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { persistenceItems } from './persistence.js';
 import { accept, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 
 const exec = promisify(execFile);
@@ -151,6 +152,13 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(error.statusCode || 500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ error: error.message, sampledAt: new Date().toISOString(), connections: [] }));
     }
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/persistence') {
+    let connections = [];
+    try { connections = (await activeConnections()).connections || []; } catch {}
+    const data = await persistenceItems(connections);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
     return;
   }
   if (req.method === 'GET' && pathname === '/api/settings') {

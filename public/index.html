@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="/theme.css">
   <script defer src="/app.js"></script>
   <script defer src="/security.js"></script>
+<script defer src="/persistence-view.js"></script>
   <script defer src="/console.js"></script>
   <script defer src="/howitworks.js"></script>
   <script defer src="/flight-map.js"></script>
@@ -27,6 +28,7 @@
         <a class="nav-item" href="#map"><span class="nav-icon">⇄</span>Map</a>
         <a class="nav-item" href="#security"><span class="nav-icon">⌑</span>Security</a>
         <a class="nav-item" href="#processes"><span class="nav-icon">⌘</span>Processes</a>
+        <a class="nav-item" href="#persistence"><span class="nav-icon">↻</span>Persistence</a>
         <a class="nav-item" href="#events"><span class="nav-icon">≋</span>Events</a>
         <a class="nav-item" href="#capture"><span class="nav-icon">◎</span>Capture</a>
         <a class="nav-item" href="#flight-map"><span class="nav-icon">✈</span>Flight Map</a>
@@ -68,6 +70,7 @@
         <div class="security-limits"><div><b>Stop process</b><p>After inspection and confirmation, sends SIGTERM to a process owned by your account. It may close unsaved work.</p></div><div><b>Network access</b><p>This action does not block or isolate traffic. Network blocking needs a separate macOS firewall integration.</p></div><div><b>Packet contents</b><p>TShark can inspect selected headers during a short capture. It cannot read TLS-encrypted app contents.</p></div></div>
       </section>
       <section id="processes" class="view" aria-labelledby="processes-heading"><div class="section-bar"><div><h2 id="processes-heading">Process traffic</h2><p>System counters for each process, sampled live by macOS.</p></div></div><div class="process-tools"><label class="process-all-toggle"><input id="process-show-all" type="checkbox"> Include processes with no network counters</label><label class="filter-label" for="process-search">Find <input id="process-search" type="search" placeholder="process, PID or user"></label><span id="process-list-count" aria-live="polite"></span></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Process</th><th>User</th><th>Received</th><th>Sent</th><th>Packets in</th><th>Packets out</th><th>Current rate</th></tr></thead><tbody id="process-list"></tbody></table></div><nav class="process-pagination" aria-label="Process list pages"><button id="process-prev" type="button" aria-label="Previous page">← Previous</button><span id="process-page" aria-live="polite">Page 1 of 1</span><button id="process-next" type="button" aria-label="Next page">Next →</button></nav><p class="metrics-note">Shows 25 processes per page, with processes sending or receiving data now first. Byte and packet totals are process-level counts since launch, not per-socket measurements. The live rate is calculated from consecutive system snapshots.</p></section>
+      <section id="persistence" class="view" aria-labelledby="persistence-heading"><div class="section-bar"><div><h2 id="persistence-heading">Persistence</h2><p>Launch agents and daemons, matched to processes with open connections. Read only.</p></div><button class="text-button" id="persistence-refresh" type="button">Refresh</button></div><div class="process-table-wrap"><table class="process-table"><thead><tr><th>Label</th><th>Scope</th><th>Program</th><th>Run at load</th><th>Keep alive</th><th>Network</th></tr></thead><tbody id="persistence-list"></tbody></table></div><p class="metrics-note" id="persistence-note">Apple system entries are listed only when they match a networked process.</p></section>
       <section id="events" class="view" aria-labelledby="events-heading"><div class="section-bar"><div><h2 id="events-heading">Recent events</h2><p>Connection changes observed while this page is open.</p></div><button class="text-button" id="clear-events" type="button">Clear history</button></div><div id="event-list" class="event-list"></div></section>
       <section id="flight-map" class="view" aria-labelledby="flight-map-heading">
         <div class="flight-intro"><span class="eyebrow">Live path · selected from this Mac</span><h2 id="flight-map-heading">Follow a connection</h2><p>Choose an open socket. Read its process, endpoints and route evidence from left to right.</p></div>
