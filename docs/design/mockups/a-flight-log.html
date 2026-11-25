@@ -1,0 +1,37 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flight Log</title>
+<style>
+:root{--paper:#f3f0e6;--sheet:#faf8f0;--ink:#26342d;--muted:#6c796d;--line:#dcd7c9;--moss:#53725b;--rust:#ad6046;--blue:#576f8d}
+@media(prefers-color-scheme:dark){:root{--paper:#171d20;--sheet:#20282a;--ink:#e7e5dc;--muted:#a0aaa2;--line:#394448;--moss:#9db99d;--rust:#d58b69;--blue:#9dbbd0}}
+body{margin:0;background:var(--paper);color:var(--ink);font:13px/1.45 ui-sans-serif,-apple-system,sans-serif;padding:16px}
+h1{font:600 15px ui-monospace,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;margin:0 0 4px}
+.sub{color:var(--muted);font-size:11px;margin-bottom:14px}
+.card{background:var(--sheet);border:1px solid var(--line);border-radius:5px;padding:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr;gap:12px}@media(min-width:900px){.grid{grid-template-columns:1.4fr 1fr}}
+table{width:100%;border-collapse:collapse;font:12px ui-monospace,Menlo,monospace}td{padding:5px 4px;border-top:1px solid var(--line)}
+.l1 td:first-child{font-weight:600}.l2 td:first-child{padding-left:18px}.l3 td:first-child{padding-left:34px;color:var(--muted)}
+.bar{height:6px;background:var(--line);border-radius:1px;position:relative;width:120px}.bar i{position:absolute;inset:0 auto 0 0;background:var(--moss)}.bar b{position:absolute;top:0;bottom:0;background:var(--rust)}
+svg text{fill:var(--muted);font:10px ui-monospace,Menlo,monospace}
+</style></head><body>
+<h1>Flight Log</h1><div class="sub">Direction A. Departures board: processes are carriers, domains are destinations, hosts are gates. Synthetic data.</div>
+<div class="card"><svg viewBox="0 0 900 70" width="100%" aria-label="time scrubber">
+<line x1="0" y1="50" x2="900" y2="50" stroke="var(--line)"/>
+<g fill="var(--moss)" opacity=".75"><rect x="10" y="38" width="8" height="12"/><rect x="40" y="30" width="8" height="20"/><rect x="70" y="42" width="8" height="8"/><rect x="100" y="20" width="8" height="30"/><rect x="130" y="34" width="8" height="16"/><rect x="160" y="10" width="8" height="40"/><rect x="190" y="28" width="8" height="22"/><rect x="220" y="44" width="8" height="6"/><rect x="250" y="36" width="8" height="14"/><rect x="280" y="24" width="8" height="26"/><rect x="310" y="40" width="8" height="10"/><rect x="340" y="18" width="8" height="32"/><rect x="370" y="30" width="8" height="20"/><rect x="400" y="44" width="8" height="6"/><rect x="430" y="26" width="8" height="24"/><rect x="460" y="38" width="8" height="12"/><rect x="490" y="14" width="8" height="36"/><rect x="520" y="32" width="8" height="18"/><rect x="550" y="40" width="8" height="10"/><rect x="580" y="22" width="8" height="28"/><rect x="610" y="36" width="8" height="14"/><rect x="640" y="12" width="8" height="38"/><rect x="670" y="30" width="8" height="20"/><rect x="700" y="42" width="8" height="8"/><rect x="730" y="26" width="8" height="24"/><rect x="760" y="34" width="8" height="16"/><rect x="790" y="20" width="8" height="30"/><rect x="820" y="38" width="8" height="12"/><rect x="850" y="28" width="8" height="22"/></g>
+<rect x="580" y="4" width="200" height="50" fill="var(--blue)" opacity=".12" stroke="var(--blue)"/>
+<path d="M580 4v50M780 4v50" stroke="var(--blue)" stroke-width="2"/>
+<text x="0" y="66">-60 min</text><text x="580" y="66">window 14:20 to 14:40</text><text x="860" y="66">now</text></svg></div>
+<div class="grid"><div class="card"><table>
+<tr class="l1"><td>browser.app</td><td><div class="bar"><i style="width:72%"></i><b style="left:72%;width:12%"></b></div></td><td>41 MB</td><td><svg width="80" height="18"><polyline fill="none" stroke="var(--moss)" points="0,14 10,12 20,6 30,10 40,4 50,9 60,7 70,12 80,5"/></svg></td></tr>
+<tr class="l2"><td>cdn.example.net</td><td><div class="bar"><i style="width:50%"></i></div></td><td>28 MB</td><td></td></tr>
+<tr class="l3"><td>203.0.113.14:443</td><td><div class="bar"><i style="width:34%"></i></div></td><td>19 MB</td><td></td></tr>
+<tr class="l3"><td>203.0.113.29:443</td><td><div class="bar"><i style="width:16%"></i></div></td><td>9 MB</td><td></td></tr>
+<tr class="l2"><td>api.example.org</td><td><div class="bar"><i style="width:14%"></i><b style="left:14%;width:8%"></b></div></td><td>13 MB</td><td></td></tr>
+<tr class="l1"><td>syncd</td><td><div class="bar"><i style="width:22%"></i><b style="left:22%;width:30%"></b></div></td><td>17 MB</td><td><svg width="80" height="18"><polyline fill="none" stroke="var(--rust)" points="0,16 10,16 20,15 30,4 40,3 50,14 60,16 70,15 80,16"/></svg></td></tr>
+<tr class="l2"><td>store.example.com <small style="color:var(--rust)">first seen</small></td><td><div class="bar"><i style="width:22%"></i><b style="left:22%;width:30%"></b></div></td><td>17 MB</td><td></td></tr>
+</table><div class="sub" style="margin:8px 0 0">Moss = received, rust = sent. Bars from nettop per-process counters; host rows show connection presence only.</div></div>
+<div class="card"><svg viewBox="0 0 360 220" width="100%" aria-label="route plane">
+<circle cx="40" cy="110" r="10" fill="var(--sheet)" stroke="var(--moss)" stroke-width="2"/><text x="20" y="135">this Mac</text>
+<g fill="none" stroke-width="1.5"><path d="M50 110 C150 30 230 30 320 40" stroke="var(--moss)"/><path d="M50 110 C150 90 230 90 320 90" stroke="var(--moss)" stroke-dasharray="4 3"/><path d="M50 110 C150 140 230 150 320 150" stroke="var(--blue)"/><path d="M50 110 C150 200 230 200 320 200" stroke="var(--rust)"/></g>
+<g fill="var(--sheet)" stroke="var(--ink)"><circle cx="320" cy="40" r="5"/><circle cx="320" cy="90" r="5"/><circle cx="320" cy="150" r="5"/><circle cx="320" cy="200" r="5" stroke="var(--rust)"/></g>
+<text x="250" y="30">cdn.example.net</text><text x="250" y="80">api.example.org</text><text x="250" y="140">time.example.edu</text><text x="230" y="215">store.example.com new</text></svg>
+<div class="sub">Route fan: one stroke per destination, width scaled by process bytes, dash = idle socket.</div></div></div>
+</body></html>

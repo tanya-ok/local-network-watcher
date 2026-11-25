@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tide Chart</title>
+<style>
+:root{--paper:#eef1ee;--sheet:#f8faf8;--ink:#1f2b2a;--muted:#667572;--line:#d3dbd8;--hi:#2f6f73;--lo:#8aa9a6;--warn:#b0743c}
+@media(prefers-color-scheme:dark){:root{--paper:#121a1c;--sheet:#1a2426;--ink:#e3ebe8;--muted:#93a5a1;--line:#2f3d3f;--hi:#7cc0bf;--lo:#3f6664;--warn:#e0a36a}}
+body{margin:0;background:var(--paper);color:var(--ink);font:13px/1.45 ui-sans-serif,-apple-system,sans-serif;padding:16px}
+h1{font:500 18px Georgia,serif;margin:0}.sub{color:var(--muted);font-size:11px;margin:2px 0 14px}
+.card{background:var(--sheet);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+.row{display:grid;grid-template-columns:110px 1fr 60px;align-items:center;gap:8px;border-top:1px solid var(--line);padding:4px 0;font:11px ui-monospace,Menlo,monospace}
+svg text{fill:var(--muted);font:10px ui-monospace,Menlo,monospace}
+</style></head><body>
+<h1>Tide Chart</h1><div class="sub">Direction B. Traffic as water level against the history.json baseline band. Synthetic data.</div>
+<div class="card"><svg viewBox="0 0 900 180" width="100%" aria-label="stacked traffic">
+<path d="M0 120 C100 110 200 125 300 112 S500 118 600 108 800 120 900 114 V150 C800 152 600 146 500 150 S300 148 200 152 0 150Z" fill="var(--line)" opacity=".7"/>
+<path d="M0 140 C80 130 160 100 240 118 S380 60 460 90 600 130 680 70 820 110 900 100 V170 H0Z" fill="var(--lo)" opacity=".8"/>
+<path d="M0 155 C80 150 160 135 240 145 S380 120 460 135 600 150 680 120 820 140 900 132 V170 H0Z" fill="var(--hi)"/>
+<path d="M680 70 v100" stroke="var(--warn)" stroke-dasharray="3 3"/><text x="686" y="66" style="fill:var(--warn)">above baseline: syncd</text>
+<text x="4" y="12">grey band = usual range (history.json)</text><text x="860" y="178">now</text></svg></div>
+<div class="card">
+<div class="row"><span>browser.app</span><svg viewBox="0 0 300 24" height="24" width="100%"><rect y="6" width="300" height="12" fill="var(--line)" opacity=".5"/><polyline fill="none" stroke="var(--hi)" stroke-width="1.5" points="0,14 40,12 80,10 120,13 160,9 200,11 240,8 300,10"/></svg><span>41 MB</span></div>
+<div class="row"><span>syncd</span><svg viewBox="0 0 300 24" height="24" width="100%"><rect y="14" width="300" height="6" fill="var(--line)" opacity=".5"/><polyline fill="none" stroke="var(--warn)" stroke-width="1.5" points="0,18 80,18 160,17 200,3 240,4 270,17 300,18"/></svg><span>17 MB</span></div>
+<div class="row"><span>mail.app</span><svg viewBox="0 0 300 24" height="24" width="100%"><rect y="12" width="300" height="8" fill="var(--line)" opacity=".5"/><polyline fill="none" stroke="var(--hi)" stroke-width="1.5" points="0,16 60,15 120,17 180,14 240,16 300,15"/></svg><span>3 MB</span></div>
+<div class="row"><span>timed</span><svg viewBox="0 0 300 24" height="24" width="100%"><rect y="18" width="300" height="4" fill="var(--line)" opacity=".5"/><polyline fill="none" stroke="var(--hi)" stroke-width="1.5" points="0,20 100,20 200,19 300,20"/></svg><span>12 KB</span></div>
+</div>
+<div class="card"><svg viewBox="0 0 900 40" width="100%"><g fill="var(--hi)"><circle cx="40" cy="20" r="3"/><circle cx="190" cy="20" r="5"/><circle cx="420" cy="20" r="2"/><circle cx="610" cy="20" r="4"/></g><circle cx="680" cy="20" r="6" fill="none" stroke="var(--warn)" stroke-width="2"/><line x1="0" y1="20" x2="900" y2="20" stroke="var(--line)"/><text x="0" y="38">event strip: first-seen destinations (lsof diff), ring = outside baseline</text></svg></div>
+</body></html>
