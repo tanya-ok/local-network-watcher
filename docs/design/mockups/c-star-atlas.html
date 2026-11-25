@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Star Atlas</title>
+<style>
+:root{--paper:#f5f3ef;--sheet:#fffdf9;--ink:#2a2733;--muted:#77707f;--line:#e0dbe2;--a:#5a5a9a;--b:#9a6a3a;--c:#4a7a6a}
+@media(prefers-color-scheme:dark){:root{--paper:#14131a;--sheet:#1c1b24;--ink:#e8e4ef;--muted:#9890a3;--line:#33303e;--a:#a6a6e0;--b:#e0b07a;--c:#8fc7b4}}
+body{margin:0;background:var(--paper);color:var(--ink);font:13px/1.45 ui-sans-serif,-apple-system,sans-serif;padding:16px}
+h1{font:300 20px ui-sans-serif,-apple-system,sans-serif;letter-spacing:.2em;margin:0}.sub{color:var(--muted);font-size:11px;margin:2px 0 14px}
+.card{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:12px}
+svg text{fill:var(--muted);font:10px ui-monospace,Menlo,monospace}
+</style></head><body>
+<h1>STAR ATLAS</h1><div class="sub">Direction C. Equal-area graticule map of destinations, drawn as a star chart, no country fills. Synthetic data, synthetic coordinates.</div>
+<div class="card"><svg viewBox="0 0 900 420" width="100%" aria-label="destination map">
+<g fill="none" stroke="var(--line)"><ellipse cx="450" cy="210" rx="420" ry="190"/><ellipse cx="450" cy="210" rx="280" ry="190"/><ellipse cx="450" cy="210" rx="140" ry="190"/><line x1="450" y1="20" x2="450" y2="400"/><line x1="30" y1="210" x2="870" y2="210"/><line x1="60" y1="130" x2="840" y2="130"/><line x1="60" y1="290" x2="840" y2="290"/></g>
+<circle cx="480" cy="140" r="5" fill="var(--ink)"/><text x="490" y="138">home</text>
+<g fill="none" stroke-width="1"><path d="M480 140 Q420 100 300 160" stroke="var(--a)"/><path d="M480 140 Q520 90 600 120" stroke="var(--a)"/><path d="M480 140 Q600 180 720 240" stroke="var(--b)" stroke-dasharray="3 3"/><path d="M480 140 Q350 220 250 300" stroke="var(--c)"/></g>
+<circle cx="300" cy="160" r="9" fill="var(--a)" opacity=".6"/><circle cx="600" cy="120" r="5" fill="var(--a)" opacity=".6"/><circle cx="720" cy="240" r="4" fill="var(--b)"/><circle cx="250" cy="300" r="3" fill="var(--c)"/>
+<g fill="var(--muted)" opacity=".5"><circle cx="330" cy="150" r="1.5"/><circle cx="560" cy="110" r="1.5"/><circle cx="210" cy="290" r="1.5"/><circle cx="640" cy="260" r="1.5"/></g>
+<text x="250" y="150">cdn (12 hosts)</text><text x="608" y="114">api</text><text x="728" y="244">store.example.com new</text><text x="200" y="318">time</text>
+<text x="40" y="410">dot area = bytes of owning process share; dim dots = seen earlier in window; no GeoIP = ring on the home meridian</text></svg></div>
+<div class="card"><svg viewBox="0 0 900 120" width="100%">
+<g fill="var(--a)"><rect x="0" y="10" width="420" height="14"/><rect x="0" y="40" width="160" height="14" fill="var(--b)"/><rect x="0" y="70" width="60" height="14" fill="var(--c)"/></g>
+<text x="430" y="21">browser.app 41 MB</text><text x="170" y="51">syncd 17 MB</text><text x="70" y="81">mail.app 3 MB</text>
+<text x="0" y="112">per-process totals (nettop) color-key the arcs above; hosts inherit process color</text></svg></div>
+</body></html>
