@@ -18,11 +18,11 @@
 .pers-name strong,.pers-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pers-name small,.pers-where{font-size:12px;color:var(--muted)}
 .pers-badges{display:flex;flex-wrap:wrap;gap:4px}
-.pers-badge{font-size:11px;padding:1px 7px;border:1px solid var(--line);border-radius:10px;color:var(--muted)}
+.pers-badge{white-space:nowrap;font-size:11px;padding:1px 7px;border:1px solid var(--line);border-radius:10px;color:var(--muted)}
 .pers-net{font-size:12px;color:var(--moss);white-space:nowrap}
 .pers-run{font-size:12px;color:var(--blue);white-space:nowrap}
 .pers-card dl{display:grid;grid-template-columns:90px 1fr;gap:4px 12px;margin:0;padding:0 14px 12px 40px;font-size:12px}
 .pers-card dt{color:var(--muted)}
 .pers-card dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;color:var(--ink)}
 .pers-card .pers-map{margin:0 0 12px 40px}
-@media (max-width:720px){.pers-card summary{grid-template-columns:14px 1fr;}.pers-where,.pers-badges,.pers-net,.pers-run{grid-column:2}}
+@media (max-width:1100px){.pers-card summary{grid-template-columns:14px minmax(0,1fr) auto;row-gap:6px}.pers-where{grid-column:2}.pers-badges{grid-column:2/4}.pers-net,.pers-run{grid-column:3;grid-row:1}}
