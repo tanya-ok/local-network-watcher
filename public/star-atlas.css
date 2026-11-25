@@ -1,0 +1,26 @@
+:root{--atlas-a:#a6a6e0;--atlas-b:#e0b07a;--atlas-c:#8fc7b4;--atlas-d:#d58b69;--atlas-e:#9dbbd0;--atlas-f:#c9a6d6}
+:root[data-theme="light"]{--atlas-a:#5a5a9a;--atlas-b:#9a6a3a;--atlas-c:#4a7a6a;--atlas-d:#ad6046;--atlas-e:#576f8d;--atlas-f:#7d5a8a}
+.atlas-card{background:var(--sheet);border:1px solid var(--line);border-radius:6px;padding:12px;margin:14px 0}
+.atlas-svg{display:block;width:100%;height:auto}
+.atlas-grid,.atlas-rim,.atlas-ring{fill:none;stroke:var(--line);stroke-width:.8}
+.atlas-grid-main{stroke-width:1.2}
+.atlas-ring{stroke-dasharray:2 4}
+.atlas-arc{fill:none;stroke-width:1;opacity:.75}
+.atlas-arc-unknown{stroke-dasharray:3 3}
+.atlas-star{cursor:pointer}
+.atlas-star circle{opacity:.7}
+.atlas-star:hover circle,.atlas-star:focus-visible circle{opacity:1;stroke:var(--ink);stroke-width:1}
+.atlas-star:focus{outline:none}
+.atlas-halo{fill:none;stroke:var(--rust);stroke-width:1.5;opacity:1}
+.atlas-home{fill:var(--ink)}
+.atlas-label{fill:var(--muted);paint-order:stroke;stroke:var(--paper);stroke-width:3px;stroke-linejoin:round;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;pointer-events:none}
+.atlas-label-new{fill:var(--rust)}
+.atlas-key{display:flex;flex-wrap:wrap;gap:6px 16px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
+.atlas-key i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.atlas-key small,.atlas-note,.atlas-foot{color:var(--muted)}
+.atlas-note{font-size:12px;margin:8px 0 0}
+.atlas-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;font-size:11px;margin-top:10px}
+.atlas-foot a{color:var(--blue)}
+.atlas-home-form{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.atlas-home-form input{width:90px;padding:5px 7px;border:1px solid var(--line);border-radius:3px;background:var(--paper);color:var(--ink);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.atlas-home-form button{padding:5px 9px;border:1px solid var(--line);border-radius:3px;background:var(--sheet);color:var(--ink);cursor:pointer}

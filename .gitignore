@@ -12,3 +12,7 @@ target/
 /docs/book/
 /docs/book-proposal.md
 /docs/research/
+
+# Offline GeoIP database (downloaded by the user, never committed)
+*.mmdb
+*.mmdb.gz

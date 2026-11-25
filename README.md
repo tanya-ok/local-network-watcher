@@ -33,7 +33,7 @@ This builds the release binary and installs `~/Applications/Local Network Watche
 - Connection snapshots are refreshed every three seconds from `lsof`; process byte and packet totals come from `nettop` and are not attributed to individual sockets. The optional process inventory is assembled from `ps` and `nettop`; the checkbox can include zero-valued processes visible in that snapshot. This is not guaranteed to equal every row Activity Monitor can show. The connection map remains limited to observed open remote sockets.
 - **Process traffic** lists 25 entries per page. Processes with a non-zero current rate appear first, followed by the highest observed rate. Search and the “include processes with no network counters” option apply to the full snapshot before paging.
 - The server samples every 15 seconds to build a local baseline. It stores process names, destination groups, ports, and timestamps in `~/Library/Application Support/LocalWatch/history.json` with restrictive file permissions. The Settings view can delete this history.
-- Reverse DNS requests use the Mac's configured resolver. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
+- Reverse DNS requests use the Mac's configured resolver (often the router). Settings > Address names turns them off; addresses are then shown as numbers and no reverse DNS queries are sent. The choice is stored in `settings.json` in the data folder; `LOCAL_WATCH_REVERSE_DNS=0` sets the default to off. Selecting an external address for owner details can run `whois` against a public registry. Those lookups leave the Mac; the app does not upload its packet capture or connection history.
 - “First seen” and other attention markers describe what this local baseline observed. They are investigation cues, not threat verdicts.
 - macOS may hide details for protected processes. Normal monitoring does not request administrator access.
 - A user can request SIGTERM for a same-account process after a confirmation. This may close unsaved work and does not block network access. Restart and network isolation are not implemented.
@@ -71,3 +71,23 @@ Local Network Watcher is open source under the MIT License. Copyright and licens
 The server samples connections every 15 seconds, also while the page is closed, and learns what is normal for 24 hours. After that it marks, with one plain sentence: an app online for the first time, a new destination for an app, an unusual port, night activity (00:00 to 06:00) from an app that is rarely online then, and a sudden traffic burst. "Looks normal" silences a marker for good.
 
 History holds metadata only (app names, destination groups by reverse-DNS domain or network block, ports, times), never packet contents. It lives in `~/Library/Application Support/LocalWatch/history.json` (folder `0700`, file `0600`). Settings has a button to delete it. `LOCAL_WATCH_DATA` and `LOCAL_WATCH_LEARNING_HOURS` override the folder and the learning period.
+
+## Star Atlas and offline GeoIP
+
+The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local, CGNAT and multicast addresses get no location.
+
+The database file is not in this repository. To add it:
+
+1. Download the current monthly `dbip-city-lite-YYYY-MM.mmdb.gz` from https://db-ip.com/db/download/ip-to-city-lite.
+2. Unpack it and place it at the default path:
+
+   ```fish
+   mkdir -p ~/Library/Application\ Support/LocalWatch/geoip
+   gunzip -c ~/Downloads/dbip-city-lite-*.mmdb.gz > ~/Library/Application\ Support/LocalWatch/geoip/dbip-city-lite.mmdb
+   ```
+
+3. Reload the tab. To use another path, start the server with `LOCAL_WATCH_GEOIP=/path/to/file.mmdb`.
+
+Without the file, `/api/atlas` reports `geoip: "missing"` and the tab places destinations on a ring around home. Home is a marker you set in the tab; it is stored only in this browser. Dot size is approximate because byte counters are per process, not per connection.
+
+IP geolocation by [DB-IP.com](https://db-ip.com), licensed under CC BY 4.0.
