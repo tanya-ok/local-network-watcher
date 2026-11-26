@@ -151,6 +151,18 @@ fn owners() -> Vec<TcpOwner> {
     unique
 }
 
+/// What the socket table looks like to this process: raw bytes per source, sockets parsed, distinct uids.
+pub fn socket_table_diag() -> serde_json::Value {
+    let src = |b: Option<Vec<u8>>| {
+        let owners = b.as_deref().map(parse_pcblist).unwrap_or_default();
+        let mut uids: Vec<u32> = owners.iter().map(|o| o.uid).collect();
+        uids.sort_unstable();
+        uids.dedup();
+        serde_json::json!({ "bytes": b.map(|v| v.len()), "sockets": owners.len(), "uids": uids })
+    };
+    serde_json::json!({ "uid": unsafe { libc::getuid() }, "direct": src(sysctl_direct()), "tool": src(sysctl_tool()) })
+}
+
 /// The owner of the client end of a loopback connection: the socket whose local end is client:client_port and whose remote end is server:server_port. Exactly one match, or None.
 pub fn match_client(
     owners: &[TcpOwner],

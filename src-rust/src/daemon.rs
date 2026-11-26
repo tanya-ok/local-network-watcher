@@ -87,6 +87,7 @@ async fn answer(req: Value, peer_uid: u32) -> Value {
     };
     let mut status = egress::status();
     status["mode"] = json!("daemon");
+    status["socketTable"] = crate::peer::socket_table_diag();
     match result {
         Ok(r) => json!({ "ok": true, "result": r, "status": status }),
         Err(e) => json!({ "ok": false, "error": e, "status": status }),
