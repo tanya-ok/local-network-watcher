@@ -196,6 +196,84 @@ pub fn profiles() -> [(&'static str, u16); 2] {
     ]
 }
 
+/// A proxy port reserved for one account. pf lets only that uid connect to it, so the port is the identity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AccountPort {
+    pub port: u16,
+    pub uid: u32,
+    pub profile: &'static str,
+}
+
+/// "accountPorts" from daemon.json: [{"port":4320,"uid":504,"profile":"open"}]. Root, admin uids, reserved and duplicate ports are dropped.
+pub fn parse_account_ports(v: Option<&Value>, admins: &approval::Admins) -> Vec<AccountPort> {
+    let reserved: Vec<u16> = profiles().iter().map(|p| p.1).chain([4317]).collect();
+    let mut out: Vec<AccountPort> = Vec::new();
+    for e in v.and_then(Value::as_array).into_iter().flatten() {
+        let port = e
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok());
+        let uid = e
+            .get("uid")
+            .and_then(Value::as_u64)
+            .and_then(|u| u32::try_from(u).ok());
+        let profile = match e.get("profile").and_then(Value::as_str) {
+            Some("open") => "open",
+            Some("strict") => "strict",
+            _ => continue,
+        };
+        let (Some(port), Some(uid)) = (port, uid) else {
+            continue;
+        };
+        if port < 1024
+            || reserved.contains(&port)
+            || uid == 0
+            || uid == peer::UNKNOWN_UID
+            || admins.contains(uid)
+            || out.iter().any(|a| a.port == port)
+        {
+            continue;
+        }
+        out.push(AccountPort { port, uid, profile });
+    }
+    out
+}
+
+fn account_ports() -> &'static [AccountPort] {
+    static PORTS: OnceLock<Vec<AccountPort>> = OnceLock::new();
+    PORTS.get_or_init(|| {
+        let file = std::fs::read_to_string(dir().join("daemon.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        parse_account_ports(
+            file.as_ref().and_then(|v| v.get("accountPorts")),
+            &approval::load_admins(&dir()),
+        )
+    })
+}
+
+/// Every listener: key, profile, port, and the account a port is reserved for.
+fn listens() -> Vec<(&'static str, &'static str, u16, Option<u32>)> {
+    static KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let keys = KEYS.get_or_init(|| {
+        account_ports()
+            .iter()
+            .map(|a| &*Box::leak(format!("{}:{}", a.profile, a.port).into_boxed_str()))
+            .collect()
+    });
+    let mut v: Vec<_> = profiles()
+        .iter()
+        .map(|(p, port)| (*p, *p, *port, None))
+        .collect();
+    v.extend(
+        account_ports()
+            .iter()
+            .zip(keys)
+            .map(|(a, k)| (*k, a.profile, a.port, Some(a.uid))),
+    );
+    v
+}
+
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The daemon keeps its own data dir; the app keeps the shared one.
@@ -746,16 +824,17 @@ async fn handle(profile: &'static str, mut client: TcpStream, who: (u32, String)
     record(e);
 }
 
-async fn accept_loop(profile: &'static str, listener: TcpListener) {
+async fn accept_loop(profile: &'static str, account: Option<u32>, listener: TcpListener) {
     loop {
         match listener.accept().await {
             Ok((socket, peer_addr)) => {
                 // Looked up while the client still waits for an answer, so its socket is in the table.
                 let server = socket.local_addr();
                 tokio::spawn(async move {
-                    let who = match server {
-                        Ok(server) => client_account(peer_addr, server).await,
-                        Err(_) => (peer::UNKNOWN_UID, "unknown".into()),
+                    let who = match (account, server) {
+                        (Some(uid), _) => (uid, peer::user_name(uid)),
+                        (None, Ok(server)) => client_account(peer_addr, server).await,
+                        (None, Err(_)) => (peer::UNKNOWN_UID, "unknown".into()),
                     };
                     handle(profile, socket, who).await;
                 });
@@ -767,16 +846,16 @@ async fn accept_loop(profile: &'static str, listener: TcpListener) {
 
 /// Starts any listener that is not running; a bind failure is kept as a per-profile error, not a crash.
 async fn start() {
-    for (profile, port) in profiles() {
-        if lock().listeners.contains_key(profile) {
+    for (key, profile, port, account) in listens() {
+        if lock().listeners.contains_key(key) {
             continue;
         }
         match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => {
                 let mut g = lock();
-                g.errors.remove(profile);
+                g.errors.remove(key);
                 g.listeners
-                    .insert(profile, tokio::spawn(accept_loop(profile, l)));
+                    .insert(key, tokio::spawn(accept_loop(profile, account, l)));
             }
             Err(e) => {
                 let message = if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -784,8 +863,8 @@ async fn start() {
                 } else {
                     format!("port {port}: {e}")
                 };
-                eprintln!("Egress {profile} proxy did not start: {message}");
-                lock().errors.insert(profile, message);
+                eprintln!("Egress {key} proxy did not start: {message}");
+                lock().errors.insert(key, message);
             }
         }
     }
@@ -1002,9 +1081,9 @@ pub fn status() -> Value {
     let recent: Vec<&Entry> = g.recent.iter().rev().take(100).collect();
     json!({
         "enabled": g.policy.enabled,
-        "running": ports.iter().all(|(p, _)| g.listeners.contains_key(p)),
+        "running": listens().iter().all(|l| g.listeners.contains_key(l.0)),
         "paused": g.policy.paused,
-        "ports": { "open": ports[0].1, "strict": ports[1].1 },
+        "ports": { "open": ports[0].1, "strict": ports[1].1, "accounts": account_ports() },
         "allow": g.policy.allow,
         "deny": g.policy.deny,
         "allowedPorts": g.policy.ports,
@@ -1035,6 +1114,38 @@ mod tests {
             deny: deny.iter().map(|s| s.to_string()).collect(),
             ports: default_ports(),
         }
+    }
+
+    #[test]
+    fn account_ports_are_checked() {
+        let admins = approval::Admins::Uids(vec![0, 501]);
+        let v = json!([
+            {"port": 4320, "uid": 504, "profile": "open"},
+            {"port": 4321, "uid": 504, "profile": "strict"},
+            {"port": 4320, "uid": 505, "profile": "open"},
+            {"port": 4322, "uid": 501, "profile": "open"},
+            {"port": 4323, "uid": 0, "profile": "open"},
+            {"port": 4318, "uid": 504, "profile": "open"},
+            {"port": 80, "uid": 504, "profile": "open"},
+            {"port": 4324, "uid": 504, "profile": "any"}
+        ]);
+        let got = parse_account_ports(Some(&v), &admins);
+        assert_eq!(
+            got,
+            vec![
+                AccountPort {
+                    port: 4320,
+                    uid: 504,
+                    profile: "open"
+                },
+                AccountPort {
+                    port: 4321,
+                    uid: 504,
+                    profile: "strict"
+                },
+            ]
+        );
+        assert!(parse_account_ports(None, &admins).is_empty());
     }
 
     #[test]

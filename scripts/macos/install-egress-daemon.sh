@@ -1,7 +1,8 @@
 #!/bin/bash
 # Installs the egress proxy as a system LaunchDaemon under a hidden service account.
-# Run as the owner: sudo scripts/macos/install-egress-daemon.sh [--binary PATH] [--dns]
+# Run as the owner: sudo scripts/macos/install-egress-daemon.sh [--binary PATH] [--dns] [--account NAME]
 # --dns also installs a root LaunchDaemon that logs DNS queries from pflog0 for the journal.
+# --account reserves ports 4320 (open) and 4321 (strict) for that account in daemon.json; pf must let only that uid reach them.
 # Idempotent: running it again updates the binary and the plists and restarts the jobs.
 set -euo pipefail
 
@@ -21,11 +22,13 @@ HERE="$(cd "$(/usr/bin/dirname "$0")" && /bin/pwd)"
 ROOT="$(cd "$HERE/../.." && /bin/pwd)"
 SOURCE="$ROOT/target/release/local-network-watcher"
 WITH_DNS=0
+PORT_ACCOUNT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --binary) SOURCE="$2"; shift 2 ;;
     --dns) WITH_DNS=1; shift ;;
+    --account) PORT_ACCOUNT="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -83,6 +86,17 @@ fi
 /bin/mv -f "$BIN.new" "$BIN"
 
 /usr/bin/install -d -o "$ACCOUNT" -g "$ACCOUNT" -m 0700 "$DATA"
+if [ -n "$PORT_ACCOUNT" ]; then
+  PORT_UID="$(/usr/bin/id -u "$PORT_ACCOUNT")"
+  if [ "$PORT_UID" -eq 0 ] || /usr/sbin/dseditgroup -o checkmember -m "$PORT_ACCOUNT" admin >/dev/null 2>&1; then
+    echo "$PORT_ACCOUNT is an administrator; reserved ports are for untrusted accounts only." >&2
+    exit 1
+  fi
+  ADMINS="$(/usr/bin/plutil -extract admins json -o - "$DATA/daemon.json" 2>/dev/null || echo '[0]')"
+  printf '{"admins":%s,"accountPorts":[{"port":4320,"uid":%s,"profile":"open"},{"port":4321,"uid":%s,"profile":"strict"}]}\n' \
+    "$ADMINS" "$PORT_UID" "$PORT_UID" > "$DATA/daemon.json"
+  echo "Reserved 4320 (open) and 4321 (strict) for $PORT_ACCOUNT (uid $PORT_UID)."
+fi
 /usr/sbin/chown -R "$ACCOUNT:$ACCOUNT" "$DATA"
 /bin/chmod 0700 "$DATA"
 /usr/bin/find "$DATA" -type f -exec /bin/chmod 0600 {} +
