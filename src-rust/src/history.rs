@@ -298,6 +298,26 @@ impl History {
         self.dirty = true;
     }
 
+    /// Markers saved before severity existed get it once a process with that name is seen again.
+    fn backfill_severity(&mut self, by_name: &HashMap<String, &'static str>) {
+        for m in self
+            .state
+            .markers
+            .iter_mut()
+            .filter(|m| m.severity.is_empty())
+        {
+            let Some(tier) = by_name.get(&m.app) else {
+                continue;
+            };
+            let owner = m.ip.as_deref().and_then(known_owner);
+            let (severity, reason) = severity_for(&m.kind, tier, &m.app, owner);
+            m.severity = severity.to_string();
+            m.reason = reason;
+            m.tier = tier.to_string();
+            self.dirty = true;
+        }
+    }
+
     /// One sample from the collector, reverse names for its addresses, and trust tiers by PID.
     pub fn observe(
         &mut self,
@@ -414,6 +434,28 @@ impl History {
                 self.add_marker(marker, tier);
             }
         }
+        // When several processes share a name, the least trusted one decides.
+        let rank = |t: &str| match t {
+            "apple-system" => 0,
+            "signed" => 1,
+            "unknown" => 2,
+            _ => 3,
+        };
+        let mut by_name: HashMap<String, &'static str> = HashMap::new();
+        let rows = snapshot
+            .connections
+            .iter()
+            .map(|r| (r.pid, &r.process))
+            .chain(snapshot.processes.iter().map(|p| (p.pid, &p.process)));
+        for (pid, name) in rows {
+            if let Some(&tier) = tiers.get(&pid) {
+                let slot = by_name.entry(name.clone()).or_insert(tier);
+                if rank(tier) > rank(slot) {
+                    *slot = tier;
+                }
+            }
+        }
+        self.backfill_severity(&by_name);
         for proc_row in &snapshot.processes {
             let total = proc_row.received_bytes + proc_row.sent_bytes;
             let prev = self.prev_totals.insert(proc_row.pid, total);
@@ -466,6 +508,33 @@ mod tests {
         assert_eq!(dest_key("2001:db8:1:2::1", ""), "2001:db8:1::/48");
         assert_eq!(dest_key("17.157.64.66", "x.apple.com"), "org:Apple");
         assert_eq!(dest_label("org:Apple"), "owned by Apple");
+    }
+
+    #[test]
+    fn backfills_old_markers_by_name() {
+        let mut h = History {
+            dir: PathBuf::new(),
+            file: PathBuf::new(),
+            learning_ms: 0,
+            state: fresh(0),
+            dirty: false,
+            prev_totals: HashMap::new(),
+        };
+        let old = |app: &str, ip: &str| Marker {
+            key: format!("dest:{app}"),
+            kind: "new-destination".into(),
+            app: app.into(),
+            ip: Some(ip.into()),
+            ..Marker::default()
+        };
+        h.state.markers = vec![old("akd", "17.157.64.66"), old("gone", "1.1.1.1")];
+        let mut by_name = HashMap::new();
+        by_name.insert("akd".to_string(), "apple-system");
+        h.backfill_severity(&by_name);
+        assert_eq!(h.state.markers[0].severity, "info");
+        assert_eq!(h.state.markers[0].tier, "apple-system");
+        assert!(h.state.markers[1].severity.is_empty());
+        assert!(h.dirty);
     }
 
     #[test]
