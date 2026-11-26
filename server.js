@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } from './process-control.js';
 import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
 import { exePath, trustFacts } from './trust.js';
+import { tierOf } from './known.js';
 import { persistenceItems } from './persistence.js';
 import { changeJob } from './launchd-control.js';
 import { geoLookup, isNonPublic } from './geoip.js';
@@ -561,15 +562,37 @@ const server = createServer(async (req, res) => {
 });
 
 
+// Trust tier per PID, from the executable path and signature. Paths are cached per PID and name.
+const pidPaths = new Map();
+async function processTiers(rows) {
+  const tiers = new Map();
+  const pids = new Map();
+  for (const r of rows) if (Number(r.pid) > 0) pids.set(Number(r.pid), r.process);
+  await Promise.all([...pids].slice(0, 80).map(async ([pid, name]) => {
+    const cacheKey = `${pid}:${name}`;
+    let path = pidPaths.get(cacheKey);
+    if (path === undefined) {
+      path = await exePath(pid);
+      pidPaths.set(cacheKey, path);
+      if (pidPaths.size > 1000) pidPaths.delete(pidPaths.keys().next().value);
+    }
+    if (path) tiers.set(pid, tierOf(await trustFacts(path)));
+  }));
+  return tiers;
+}
+
 // Background sampling builds the local baseline even when the page is closed.
+let sampling = false;
 async function sample() {
+  if (sampling) return;
+  sampling = true;
   try {
     const data = await activeConnections();
     const ips = [...new Set((data.connections || []).map((r) => String(r.remote).replace(/:\d+$/, '').replace(/^\[|\]$/g, '')))];
-    await Promise.all(ips.slice(0, 80).map((ip) => reverseName(ip)));
-    observe(data, nameCache);
+    const [tiers] = await Promise.all([processTiers([...(data.connections || []), ...(data.processes || [])]), ...ips.slice(0, 80).map((ip) => reverseName(ip))]);
+    observe(data, nameCache, tiers);
     await saveHistory();
-  } catch { /* sampling is best effort */ }
+  } catch { /* sampling is best effort */ } finally { sampling = false; }
 }
 await loadHistory();
 setInterval(sample, 15000);

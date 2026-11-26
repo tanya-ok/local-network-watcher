@@ -610,11 +610,15 @@ const attention = document.querySelector('#attention');
 let markers = [];
 let learningUntil = 0;
 const KIND_LABEL = { 'new-app': 'New app online', 'new-destination': 'New destination', 'unusual-port': 'Unusual port', night: 'Night activity', volume: 'Unusual volume' };
+const SEV_LABEL = { attention: 'Needs a look', notice: 'Worth knowing', info: 'Routine' };
+const SEV_ORDER = { attention: 0, notice: 1, info: 2 };
+const sevOf = (m) => m.severity || 'notice';
+const isRoutine = (m) => sevOf(m) === 'info';
 async function loadMarkers() {
   try {
     const res = await fetch('/api/markers', { cache: 'no-store' });
     const data = await res.json();
-    markers = data.markers || [];
+    markers = (data.markers || []).sort((a, b) => SEV_ORDER[sevOf(a)] - SEV_ORDER[sevOf(b)] || b.at - a.at);
     learningUntil = data.learningUntil || 0;
     const info = document.querySelector('#history-info');
     if (info) info.textContent = `${data.apps} apps learned · stored only on this Mac in ${data.file}`;
@@ -626,11 +630,13 @@ async function loadMarkers() {
 function renderAttention() {
   const learning = Date.now() < learningUntil;
   const head = learning ? `<p class="attention-learning">Learning what is normal for this Mac until ${new Date(learningUntil).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}. Markers start after that.</p>` : '';
-  if (!markers.length) {
-    attention.innerHTML = head || '<p class="attention-quiet">Nothing needs a look right now.</p>';
-    return;
-  }
-  attention.innerHTML = `${head}<div class="attention-list">${markers.slice(0, 8).map((m, i) => `<article class="attention-item" data-i="${i}"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)}</span><p>${esc(m.text)}</p><small>${esc(new Date(m.at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small><div class="attention-actions"><button class="text-button attention-show" type="button">Show on map</button><button class="text-button attention-ok" type="button">Looks normal</button></div></article>`).join('')}</div>`;
+  const indexed = markers.map((m, i) => [m, i]);
+  const main = indexed.filter(([m]) => !isRoutine(m));
+  const routine = indexed.filter(([m]) => isRoutine(m));
+  const card = ([m, i]) => `<article class="attention-item" data-i="${i}" data-sev="${esc(sevOf(m))}"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)} · ${esc(SEV_LABEL[sevOf(m)])}</span><p>${esc(m.text)}</p>${m.reason ? `<p class="attention-reason">${esc(m.reason)}</p>` : ''}<small>${esc(new Date(m.at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small><div class="attention-actions"><button class="text-button attention-show" type="button">Show on map</button><button class="text-button attention-ok" type="button">Looks normal</button></div></article>`;
+  const list = main.length ? `<div class="attention-list">${main.slice(0, 8).map(card).join('')}</div>` : '<p class="attention-quiet">Nothing needs a look right now.</p>';
+  const folded = routine.length ? `<details class="attention-routine"><summary>${routine.length} routine ${routine.length === 1 ? 'event' : 'events'}: macOS services talking to Apple, account sync and downloads</summary><div class="attention-list">${routine.slice(0, 24).map(card).join('')}</div></details>` : '';
+  attention.innerHTML = `${head}${list}${folded}`;
 }
 attention.addEventListener('click', async (e) => {
   const card = e.target.closest('.attention-item');
@@ -652,10 +658,11 @@ attention.addEventListener('click', async (e) => {
 const baseRenderMap = renderMap;
 renderMap = function () {
   baseRenderMap();
-  const flaggedApps = new Set(markers.map((m) => m.app));
-  const flaggedIps = new Set(markers.map((m) => m.ip).filter(Boolean));
+  const flagged = markers.filter((m) => !isRoutine(m));
+  const flaggedApps = new Set(flagged.map((m) => m.app));
+  const flaggedIps = new Set(flagged.map((m) => m.ip).filter(Boolean));
   mapSvg.querySelectorAll('.map-node').forEach((g) => g.classList.toggle('flag', flaggedApps.has(g.dataset.app) || flaggedIps.has(g.dataset.ip)));
-  mapSvg.querySelectorAll('.map-line').forEach((p) => { const [a, ip] = p.dataset.key.split('|'); p.classList.toggle('flag', markers.some((m) => m.app === a && m.ip === ip)); });
+  mapSvg.querySelectorAll('.map-line').forEach((p) => { const [a, ip] = p.dataset.key.split('|'); p.classList.toggle('flag', flagged.some((m) => m.app === a && m.ip === ip)); });
 };
 document.querySelector('#forget-history').addEventListener('click', async (e) => {
   const button = e.target;

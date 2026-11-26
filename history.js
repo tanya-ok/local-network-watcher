@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { knownOwner, severityFor } from './known.js';
 
 // Metadata only: app names, destination groups, ports, times. Never packet contents.
 const DIR = process.env.LOCAL_WATCH_DATA || join(homedir(), 'Library', 'Application Support', 'LocalWatch');
@@ -62,6 +63,8 @@ function isPrivate(ip) {
 }
 // Group a destination by its owner's domain when reverse DNS knows it, otherwise by network block.
 export function destKey(ip, name) {
+  const owner = knownOwner(ip);
+  if (owner) return `org:${owner}`;
   if (name) {
     const labels = name.replace(/\.$/, '').split('.');
     const two = labels.slice(-2).join('.');
@@ -71,16 +74,31 @@ export function destKey(ip, name) {
   return `${ip.split('.').slice(0, 3).join('.')}.0/24`;
 }
 
-function addMarker(marker, now) {
+function destLabel(key) {
+  return key.startsWith('org:') ? `owned by ${key.slice(4)}` : key;
+}
+
+// An older history grouped owner ranges by /24; treat those blocks as already known.
+function knownBeforeOwnerGrouping(dests, owner) {
+  return Object.keys(dests).some((k) => {
+    if (/^\d+\.\d+\.\d+\.0\/24$/.test(k)) return knownOwner(k.replace(/0\/24$/, '1')) === owner;
+    if (k.endsWith('::/48')) return knownOwner(k.replace(/::\/48$/, '::1')) === owner;
+    return false;
+  });
+}
+
+function addMarker(marker, now, tier = 'unknown') {
   if (state.accepted[marker.key]) return;
+  const [severity, reason] = severityFor(marker.kind, tier, marker.app, marker.ip ? knownOwner(marker.ip) : '');
+  marker = { ...marker, tier, severity, reason };
   if (state.markers.some((m) => m.key === marker.key && now - m.at < 24 * 3600 * 1000)) return;
   state.markers.unshift({ ...marker, at: now });
   state.markers.splice(300);
   dirty = true;
 }
 
-// One sample from the Rust core plus reverse names for its addresses.
-export function observe(snapshot, names, now = Date.now()) {
+// One sample from the Rust core, reverse names for its addresses, and trust tiers by PID.
+export function observe(snapshot, names, tiers = new Map(), now = Date.now()) {
   if (!state) return;
   const learning = now < learningUntil();
   const hour = new Date(now).getHours();
@@ -93,26 +111,28 @@ export function observe(snapshot, names, now = Date.now()) {
     const port = portOf(row.remote);
     const name = names.get(ip) || '';
     const key = destKey(ip, name);
+    const tier = tiers.get(Number(row.pid)) || 'unknown';
     let app = state.apps[appName];
     if (!app) {
       app = state.apps[appName] = { firstSeen: now, lastSeen: now, nightSamples: 0, dests: {}, ports: {}, rate: 0 };
       dirty = true;
-      if (!learning) addMarker({ key: `app:${appName}`, kind: 'new-app', app: appName, ip, dest: key, text: `${appName} went online for the first time since this monitor started watching.` }, now);
+      if (!learning) addMarker({ key: `app:${appName}`, kind: 'new-app', app: appName, ip, dest: key, text: `${appName} went online for the first time since this monitor started watching.` }, now, tier);
     }
     app.lastSeen = now;
     if (!app.dests[key]) {
+      const migrated = key.startsWith('org:') && knownBeforeOwnerGrouping(app.dests, key.slice(4));
       app.dests[key] = now;
       dirty = true;
-      if (!learning && now - app.firstSeen > 3600 * 1000) addMarker({ key: `dest:${appName}:${key}`, kind: 'new-destination', app: appName, ip, dest: key, text: `${appName} connected to ${name || ip} (${key}), a destination it has not used before.` }, now);
+      if (!migrated && !learning && now - app.firstSeen > 3600 * 1000) addMarker({ key: `dest:${appName}:${key}`, kind: 'new-destination', app: appName, ip, dest: key, text: `${appName} connected to ${name || ip} (${destLabel(key)}), a destination it has not used before.` }, now, tier);
     }
     if (port && !app.ports[port]) {
       app.ports[port] = now;
       dirty = true;
-      if (!learning && !COMMON_PORTS.has(port)) addMarker({ key: `port:${appName}:${port}`, kind: 'unusual-port', app: appName, ip, dest: key, text: `${appName} used port ${port}, which is not a usual web, mail or system port.` }, now);
+      if (!learning && !COMMON_PORTS.has(port)) addMarker({ key: `port:${appName}:${port}`, kind: 'unusual-port', app: appName, ip, dest: key, text: `${appName} used port ${port}, which is not a usual web, mail or system port.` }, now, tier);
     }
     if (night && !seenAppsThisSample.has(appName)) {
       seenAppsThisSample.add(appName);
-      if (!learning && app.nightSamples < 3) addMarker({ key: `night:${appName}`, kind: 'night', app: appName, ip, dest: key, text: `${appName} was online at ${String(hour).padStart(2, '0')}:00, and it rarely is at night.` }, now);
+      if (!learning && app.nightSamples < 3) addMarker({ key: `night:${appName}`, kind: 'night', app: appName, ip, dest: key, text: `${appName} was online at ${String(hour).padStart(2, '0')}:00, and it rarely is at night.` }, now, tier);
       app.nightSamples += 1;
       dirty = true;
     }
@@ -126,7 +146,7 @@ export function observe(snapshot, names, now = Date.now()) {
     if (prev == null || total < prev) continue;
     const delta = total - prev;
     if (!learning && app.rate > 0 && delta > Math.max(50 * MB, app.rate * 20)) {
-      addMarker({ key: `volume:${proc.process}:${Math.floor(now / 3600000)}`, kind: 'volume', app: proc.process, text: `${proc.process} moved ${(delta / MB).toFixed(0)} MB in a few seconds, far more than usual for it.` }, now);
+      addMarker({ key: `volume:${proc.process}:${Math.floor(now / 3600000)}`, kind: 'volume', app: proc.process, text: `${proc.process} moved ${(delta / MB).toFixed(0)} MB in a few seconds, far more than usual for it.` }, now, tiers.get(Number(proc.pid)) || 'unknown');
     }
     app.rate = app.rate ? app.rate * 0.95 + delta * 0.05 : delta;
   }
