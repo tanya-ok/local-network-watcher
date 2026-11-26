@@ -165,7 +165,7 @@ impl Admins {
     }
 }
 
-/// "501,0" is a uid list, "group:staff" a group; anything unparsable falls back to the admin group.
+/// "501,0" is a uid list, "group:staff" a group; anything unparsable falls back to root only.
 pub fn parse_admins(spec: &str) -> Admins {
     if let Some(g) = spec.trim().strip_prefix("group:") {
         return Admins::Group(g.trim().to_string());
@@ -178,11 +178,11 @@ pub fn parse_admins(spec: &str) -> Admins {
         .collect();
     match uids {
         Ok(v) if !v.is_empty() => Admins::Uids(v),
-        _ => Admins::Group("admin".into()),
+        _ => Admins::Uids(vec![0]),
     }
 }
 
-/// LOCAL_WATCH_EGRESS_ADMINS, then "admins" in daemon.json in the egress dir, then the admin group.
+/// LOCAL_WATCH_EGRESS_ADMINS, then "admins" in daemon.json in the egress dir, then root only.
 pub fn load_admins(dir: &Path) -> Admins {
     if let Ok(spec) = std::env::var("LOCAL_WATCH_EGRESS_ADMINS") {
         return parse_admins(&spec);
@@ -199,12 +199,12 @@ pub fn load_admins(dir: &Path) -> Admins {
                 .filter_map(|u| u32::try_from(u).ok())
                 .collect();
             if uids.is_empty() {
-                Admins::Group("admin".into())
+                Admins::Uids(vec![0])
             } else {
                 Admins::Uids(uids)
             }
         }
-        _ => Admins::Group("admin".into()),
+        _ => Admins::Uids(vec![0]),
     }
 }
 
@@ -351,14 +351,14 @@ mod tests {
     fn admin_lists() {
         assert_eq!(parse_admins("501, 0"), Admins::Uids(vec![501, 0]));
         assert_eq!(parse_admins("group:staff"), Admins::Group("staff".into()));
-        assert_eq!(parse_admins("junk"), Admins::Group("admin".into()));
-        assert_eq!(parse_admins(""), Admins::Group("admin".into()));
+        assert_eq!(parse_admins("junk"), Admins::Uids(vec![0]));
+        assert_eq!(parse_admins(""), Admins::Uids(vec![0]));
         let l = parse_admins("501");
         assert!(l.contains(501));
         assert!(!l.contains(504));
         assert!(!l.contains(crate::peer::UNKNOWN_UID));
         assert!(Admins::Group("wheel".into()).contains(0));
-        assert!(!Admins::Group("admin".into()).contains(crate::peer::UNKNOWN_UID));
+        assert!(!Admins::Uids(vec![0]).contains(crate::peer::UNKNOWN_UID));
     }
 
     #[test]
