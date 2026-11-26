@@ -2,6 +2,7 @@
 //! Metadata only: app names, destination groups, ports, times. Never packet contents.
 
 use crate::collector::Snapshot;
+use crate::known::{known_owner, severity_for};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -32,7 +33,7 @@ pub struct App {
     pub rate: f64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Marker {
     pub key: String,
     pub kind: String,
@@ -43,6 +44,12 @@ pub struct Marker {
     pub dest: Option<String>,
     pub text: String,
     pub at: u64,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub tier: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,6 +132,9 @@ pub fn is_private(ip: &str) -> bool {
 
 /// Group a destination by its owner's domain when reverse DNS knows it, otherwise by network block.
 pub fn dest_key(ip: &str, name: &str) -> String {
+    if let Some(owner) = known_owner(ip) {
+        return format!("org:{owner}");
+    }
     if !name.is_empty() {
         let labels: Vec<&str> = name.trim_end_matches('.').split('.').collect();
         let tail = |n: usize| labels[labels.len().saturating_sub(n)..].join(".");
@@ -146,6 +156,25 @@ pub fn dest_key(ip: &str, name: &str) -> String {
         "{}.0/24",
         ip.split('.').take(3).collect::<Vec<_>>().join(".")
     )
+}
+
+fn dest_label(key: &str) -> String {
+    key.strip_prefix("org:")
+        .map_or_else(|| key.to_string(), |o| format!("owned by {o}"))
+}
+
+/// An older history grouped owner ranges by /24 or /48; treat those blocks as already known.
+fn known_before_owner_grouping(dests: &HashMap<String, u64>, owner: &str) -> bool {
+    dests.keys().any(|k| {
+        let probe = if let Some(net) = k.strip_suffix(".0/24") {
+            format!("{net}.1")
+        } else if let Some(net) = k.strip_suffix("::/48") {
+            format!("{net}::1")
+        } else {
+            return false;
+        };
+        known_owner(&probe) == Some(owner)
+    })
 }
 
 impl History {
@@ -247,10 +276,15 @@ impl History {
             .collect()
     }
 
-    fn add_marker(&mut self, marker: Marker) {
+    fn add_marker(&mut self, mut marker: Marker, tier: &str) {
         if self.state.accepted.contains_key(&marker.key) {
             return;
         }
+        let owner = marker.ip.as_deref().and_then(known_owner);
+        let (severity, reason) = severity_for(&marker.kind, tier, &marker.app, owner);
+        marker.severity = severity.to_string();
+        marker.reason = reason;
+        marker.tier = tier.to_string();
         if self
             .state
             .markers
@@ -264,8 +298,14 @@ impl History {
         self.dirty = true;
     }
 
-    /// One sample from the collector plus reverse names for its addresses.
-    pub fn observe(&mut self, snapshot: &Snapshot, names: &HashMap<String, String>, now: u64) {
+    /// One sample from the collector, reverse names for its addresses, and trust tiers by PID.
+    pub fn observe(
+        &mut self,
+        snapshot: &Snapshot,
+        names: &HashMap<String, String>,
+        tiers: &HashMap<u32, &'static str>,
+        now: u64,
+    ) {
         let learning = now < self.learning_until();
         let hour = local_hour(now);
         let night = hour < 6;
@@ -283,6 +323,7 @@ impl History {
             let port = port_of(&row.remote).to_string();
             let name = names.get(&ip).cloned().unwrap_or_default();
             let key = dest_key(&ip, &name);
+            let tier = tiers.get(&row.pid).copied().unwrap_or("unknown");
             let mut new_markers = Vec::new();
             let app = match self.state.apps.get_mut(&app_name) {
                 Some(app) => app,
@@ -297,6 +338,7 @@ impl History {
                             dest: Some(key.clone()),
                             text: format!("{app_name} went online for the first time since this monitor started watching."),
                             at: now,
+                            ..Marker::default()
                         });
                     }
                     self.state.apps.entry(app_name.clone()).or_insert(App {
@@ -308,9 +350,12 @@ impl History {
             };
             app.last_seen = now;
             if !app.dests.contains_key(&key) {
+                let migrated = key
+                    .strip_prefix("org:")
+                    .is_some_and(|o| known_before_owner_grouping(&app.dests, o));
                 app.dests.insert(key.clone(), now);
                 self.dirty = true;
-                if !learning && now.saturating_sub(app.first_seen) > HOUR_MS {
+                if !migrated && !learning && now.saturating_sub(app.first_seen) > HOUR_MS {
                     let shown = if name.is_empty() {
                         ip.clone()
                     } else {
@@ -322,8 +367,12 @@ impl History {
                         app: app_name.clone(),
                         ip: Some(ip.clone()),
                         dest: Some(key.clone()),
-                        text: format!("{app_name} connected to {shown} ({key}), a destination it has not used before."),
+                        text: format!(
+                            "{app_name} connected to {shown} ({}), a destination it has not used before.",
+                            dest_label(&key)
+                        ),
                         at: now,
+                        ..Marker::default()
                     });
                 }
             }
@@ -339,6 +388,7 @@ impl History {
                         dest: Some(key.clone()),
                         text: format!("{app_name} used port {port}, which is not a usual web, mail or system port."),
                         at: now,
+                        ..Marker::default()
                     });
                 }
             }
@@ -354,13 +404,14 @@ impl History {
                             "{app_name} was online at {hour:02}:00, and it rarely is at night."
                         ),
                         at: now,
+                        ..Marker::default()
                     });
                 }
                 app.night_samples += 1;
                 self.dirty = true;
             }
             for marker in new_markers {
-                self.add_marker(marker);
+                self.add_marker(marker, tier);
             }
         }
         for proc_row in &snapshot.processes {
@@ -382,18 +433,22 @@ impl History {
             };
             if burst {
                 let name = proc_row.process.clone();
-                self.add_marker(Marker {
-                    key: format!("volume:{name}:{}", now / HOUR_MS),
-                    kind: "volume".into(),
-                    app: name.clone(),
-                    ip: None,
-                    dest: None,
-                    text: format!(
-                        "{name} moved {:.0} MB in a few seconds, far more than usual for it.",
-                        delta / MB
-                    ),
-                    at: now,
-                });
+                self.add_marker(
+                    Marker {
+                        key: format!("volume:{name}:{}", now / HOUR_MS),
+                        kind: "volume".into(),
+                        app: name.clone(),
+                        ip: None,
+                        dest: None,
+                        text: format!(
+                            "{name} moved {:.0} MB in a few seconds, far more than usual for it.",
+                            delta / MB
+                        ),
+                        at: now,
+                        ..Marker::default()
+                    },
+                    tiers.get(&proc_row.pid).copied().unwrap_or("unknown"),
+                );
             }
         }
     }
@@ -409,6 +464,16 @@ mod tests {
         assert_eq!(dest_key("1.2.3.4", "a.b.bbc.co.uk"), "bbc.co.uk");
         assert_eq!(dest_key("5.6.7.8", ""), "5.6.7.0/24");
         assert_eq!(dest_key("2001:db8:1:2::1", ""), "2001:db8:1::/48");
+        assert_eq!(dest_key("17.157.64.66", "x.apple.com"), "org:Apple");
+        assert_eq!(dest_label("org:Apple"), "owned by Apple");
+    }
+
+    #[test]
+    fn old_blocks_count_as_known_owner() {
+        let mut dests = HashMap::new();
+        dests.insert("17.8.130.0/24".to_string(), 1);
+        assert!(known_before_owner_grouping(&dests, "Apple"));
+        assert!(!known_before_owner_grouping(&dests, "Google"));
     }
 
     #[test]

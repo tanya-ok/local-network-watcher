@@ -11,6 +11,7 @@ mod egress;
 mod facts;
 mod geoip;
 mod history;
+mod known;
 mod peer;
 mod settings;
 
@@ -853,9 +854,56 @@ async fn static_file(method: Method, request: Request) -> Reply {
     }
 }
 
+/// Trust tier per PID, from the executable path and signature. Paths are cached per PID and name.
+async fn process_tiers(
+    snapshot: &collector::Snapshot,
+    paths: &mut HashMap<(u32, String), Option<String>>,
+) -> HashMap<u32, &'static str> {
+    let mut pids: Vec<(u32, String)> = Vec::new();
+    let rows = snapshot
+        .connections
+        .iter()
+        .map(|r| (r.pid, &r.process))
+        .chain(snapshot.processes.iter().map(|p| (p.pid, &p.process)));
+    for (pid, name) in rows {
+        if pid > 0 && !pids.iter().any(|(p, _)| *p == pid) {
+            pids.push((pid, name.clone()));
+        }
+        if pids.len() >= 80 {
+            break;
+        }
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for (pid, name) in pids {
+        let cached = paths.get(&(pid, name.clone())).cloned();
+        tasks.spawn(async move {
+            let path = match cached {
+                Some(p) => p,
+                None => control::exe_path(pid).await,
+            };
+            let tier = match &path {
+                Some(p) => known::tier_of(&control::trust_facts(p).await),
+                None => "unknown",
+            };
+            (pid, name, path, tier)
+        });
+    }
+    let mut tiers = HashMap::new();
+    while let Some(Ok((pid, name, path, tier))) = tasks.join_next().await {
+        if paths.len() > 1000 {
+            paths.clear();
+        }
+        paths.insert((pid, name), path);
+        tiers.insert(pid, tier);
+    }
+    tiers
+}
+
 /// Background sampling builds the local baseline even when the page is closed.
 async fn sampler(state: AppState) {
     let mut tick = tokio::time::interval(Duration::from_secs(15));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut paths = HashMap::new();
     loop {
         tick.tick().await;
         let Ok(snapshot) = collect().await else {
@@ -879,9 +927,10 @@ async fn sampler(state: AppState) {
         for ip in ips.iter().take(80) {
             state.caches.reverse_name(ip).await;
         }
+        let tiers = process_tiers(&snapshot, &mut paths).await;
         let names = state.caches.names_snapshot();
         let mut h = state.history.lock().await;
-        h.observe(&snapshot, &names, history::now_ms());
+        h.observe(&snapshot, &names, &tiers, history::now_ms());
         if let Err(e) = h.save() {
             eprintln!("Could not save history: {e}");
         }

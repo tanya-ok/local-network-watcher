@@ -2,3 +2,4 @@
 .security-trust-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 6px; }
 .security-trust-grid strong { word-break: break-all; }
 .security-trust-notes { margin: 8px 0 4px; padding-left: 18px; }
+.security-marker[data-sev="notice"]>div:first-child span{color:var(--muted)}.security-marker>p.security-reason{color:var(--muted);font-size:11px}.security-routine{margin:8px 2px 0;color:var(--muted);font:italic 12px Georgia,"Times New Roman",serif}
