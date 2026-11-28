@@ -15,13 +15,14 @@ let dirty = false;
 const prevTotals = new Map();
 
 function fresh() {
-  return { createdAt: Date.now(), apps: {}, accepted: {}, markers: [] };
+  return { createdAt: Date.now(), apps: {}, accepted: {}, markers: [], ai: {} };
 }
 
 export async function loadHistory() {
   try {
     state = JSON.parse(await readFile(HISTORY_FILE, 'utf8'));
     if (!state.apps || !state.markers) state = fresh();
+    state.ai ||= {};
   } catch {
     state = fresh();
   }
@@ -153,7 +154,29 @@ export function observe(snapshot, names, tiers = new Map(), now = Date.now()) {
 }
 
 export function currentMarkers(now = Date.now()) {
-  return state.markers.filter((m) => !state.accepted[m.key] && now - m.at < 7 * 24 * 3600 * 1000);
+  return state.markers.filter((m) => !state.accepted[m.key] && now - m.at < 7 * 24 * 3600 * 1000).map((m) => (state.ai[m.key] ? { ...m, ai: state.ai[m.key] } : m));
+}
+
+// Stores a local model verdict. A "normal" verdict silences the marker the same way "Looks normal" does.
+export function recordReview(key, review) {
+  if (!state.markers.some((m) => m.key === key)) return false;
+  state.ai[key] = { ...review, at: Date.now() };
+  if (review.verdict === 'normal') state.accepted[key] = Date.now();
+  dirty = true;
+  return true;
+}
+
+// Markers the local model silenced in the last 7 days, so a person can review or restore them.
+export function aiCleared(now = Date.now()) {
+  return state.markers.filter((m) => state.ai[m.key]?.verdict === 'normal' && state.accepted[m.key] && now - m.at < 7 * 24 * 3600 * 1000).map((m) => ({ ...m, ai: state.ai[m.key] }));
+}
+
+export function restore(key) {
+  if (!state.ai[key] || state.ai[key].verdict !== 'normal') return false;
+  delete state.accepted[key];
+  state.ai[key] = { ...state.ai[key], verdict: 'restored' };
+  dirty = true;
+  return true;
 }
 
 export function accept(key) {

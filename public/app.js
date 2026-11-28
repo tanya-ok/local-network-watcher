@@ -608,6 +608,8 @@ function layersHtml(p) {
 // Attention markers from the local baseline
 const attention = document.querySelector('#attention');
 let markers = [];
+let aiClearedMarkers = [];
+let aiStatus = '';
 let learningUntil = 0;
 const KIND_LABEL = { 'new-app': 'New app online', 'new-destination': 'New destination', 'unusual-port': 'Unusual port', night: 'Night activity', volume: 'Unusual volume' };
 const SEV_LABEL = { attention: 'Needs a look', notice: 'Worth knowing', info: 'Routine' };
@@ -619,6 +621,7 @@ async function loadMarkers() {
     const res = await fetch('/api/markers', { cache: 'no-store' });
     const data = await res.json();
     markers = (data.markers || []).sort((a, b) => SEV_ORDER[sevOf(a)] - SEV_ORDER[sevOf(b)] || b.at - a.at);
+    aiClearedMarkers = data.aiCleared || [];
     learningUntil = data.learningUntil || 0;
     const info = document.querySelector('#history-info');
     if (info) info.textContent = `${data.apps} apps learned · stored only on this Mac in ${data.file}`;
@@ -633,11 +636,43 @@ function renderAttention() {
   const indexed = markers.map((m, i) => [m, i]);
   const main = indexed.filter(([m]) => !isRoutine(m));
   const routine = indexed.filter(([m]) => isRoutine(m));
-  const card = ([m, i]) => `<article class="attention-item" data-i="${i}" data-sev="${esc(sevOf(m))}"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)} · ${esc(SEV_LABEL[sevOf(m)])}</span><p>${esc(m.text)}</p>${m.reason ? `<p class="attention-reason">${esc(m.reason)}</p>` : ''}<small>${esc(new Date(m.at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small><div class="attention-actions"><button class="text-button attention-show" type="button">Show on map</button><button class="text-button attention-ok" type="button">Looks normal</button></div></article>`;
+  const card = ([m, i]) => `<article class="attention-item" data-i="${i}" data-sev="${esc(sevOf(m))}"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)} · ${esc(SEV_LABEL[sevOf(m)])}</span><p>${esc(m.text)}</p>${m.reason ? `<p class="attention-reason">${esc(m.reason)}</p>` : ''}${aiNote(m)}<small>${esc(new Date(m.at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small><div class="attention-actions"><button class="text-button attention-show" type="button">Show on map</button><button class="text-button attention-ok" type="button">Looks normal</button></div></article>`;
   const list = main.length ? `<div class="attention-list">${main.slice(0, 8).map(card).join('')}</div>` : '<p class="attention-quiet">Nothing needs a look right now.</p>';
   const folded = routine.length ? `<details class="attention-routine"><summary>${routine.length} routine ${routine.length === 1 ? 'event' : 'events'}: macOS services talking to Apple, account sync and downloads</summary><div class="attention-list">${routine.slice(0, 24).map(card).join('')}</div></details>` : '';
-  attention.innerHTML = `${head}${list}${folded}`;
+  attention.innerHTML = `${head}${aiToolbar()}${list}${folded}${aiClearedList()}`;
 }
+// Local model review: "normal" markers are silenced, the rest stay with the model's reason.
+function aiNote(m) {
+  return m.ai ? `<p class="attention-ai" data-verdict="${esc(m.ai.verdict)}"><b>AI ${m.ai.verdict === 'restored' ? 'cleared, restored by you' : m.ai.verdict}:</b> ${esc(m.ai.reason)}</p>` : '';
+}
+function aiToolbar() {
+  const pending = markers.filter((m) => !m.ai).length;
+  return `<div class="attention-ai-bar"><button class="cap-button" type="button" data-ai-analyze ${pending && !aiStatus.startsWith('Analyzing') ? '' : 'disabled'}>Analyze with AI${pending ? ` (${pending})` : ''}</button><span class="attention-ai-status" aria-live="polite">${esc(aiStatus || (pending ? 'The local model reviews new markers and clears the ones that look normal.' : 'All markers have been reviewed.'))}</span></div>`;
+}
+function aiClearedList() {
+  if (!aiClearedMarkers.length) return '';
+  return `<details class="attention-routine attention-ai-cleared"><summary>${aiClearedMarkers.length} cleared by the local model in the last 7 days</summary><div class="attention-list">${aiClearedMarkers.slice(0, 30).map((m) => `<article class="attention-item" data-sev="info"><span class="attention-kind">${esc(KIND_LABEL[m.kind] || m.kind)}</span><p>${esc(m.text)}</p>${aiNote(m)}<div class="attention-actions"><button class="text-button" type="button" data-ai-restore="${esc(m.key)}">Restore marker</button></div></article>`).join('')}</div></details>`;
+}
+document.addEventListener('click', async (e) => {
+  const restoreBtn = e.target.closest('[data-ai-restore]');
+  if (restoreBtn) {
+    await fetch('/api/markers/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: restoreBtn.dataset.aiRestore }) });
+    loadMarkers();
+    return;
+  }
+  if (!e.target.closest('[data-ai-analyze]')) return;
+  aiStatus = 'Analyzing with the local model. This can take a minute…';
+  renderAttention(); window.dispatchEvent(new CustomEvent('markers-updated'));
+  try {
+    const res = await fetch('/api/markers/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'Analysis failed.');
+    aiStatus = `${r.model}: ${r.cleared} cleared as normal, ${r.kept} kept as suspicious${r.skipped ? `, ${r.skipped} not answered` : ''}.`;
+  } catch (err) {
+    aiStatus = `Analysis failed: ${err.message}`;
+  }
+  loadMarkers();
+});
 attention.addEventListener('click', async (e) => {
   const card = e.target.closest('.attention-item');
   if (!card) return;

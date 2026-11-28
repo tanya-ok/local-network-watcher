@@ -9,7 +9,8 @@ import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } from './process-control.js';
-import { accept, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, saveHistory, summary } from './history.js';
+import { accept, aiCleared, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, recordReview, restore, saveHistory, summary } from './history.js';
+import { clearable, reviewMarkers } from './ai-review.js';
 import { exePath, trustFacts } from './trust.js';
 import { tierOf } from './known.js';
 import { persistenceItems } from './persistence.js';
@@ -378,7 +379,54 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === 'GET' && pathname === '/api/markers') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), markers: currentMarkers() }));
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify({ ...summary(), markers: currentMarkers(), aiCleared: aiCleared() }));
+    return;
+  }
+  if (req.method === 'POST' && (pathname === '/api/markers/analyze' || pathname === '/api/markers/restore')) {
+    const origin = req.headers.origin || '';
+    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin) || !origin.endsWith(`:${port}`)) {
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'Only this page can analyze markers.' }));
+      return;
+    }
+    let body = '';
+    for await (const chunk of req) { body += chunk; if (body.length > 1024) break; }
+    const reply = (code, data) => res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(data));
+    if (pathname === '/api/markers/restore') {
+      try {
+        const { key } = JSON.parse(body || '{}');
+        if (!restore(key)) throw new Error('Nothing to restore.');
+        await saveHistory();
+        reply(200, { ok: true });
+      } catch (e) { reply(400, { error: e.message }); }
+      return;
+    }
+    if (explaining) { reply(429, { error: 'The local model is busy. Try again in a moment.' }); return; }
+    explaining = true;
+    try {
+      const pending = currentMarkers().filter((m) => !m.ai).slice(0, 200);
+      const byKey = new Map(pending.map((m) => [m.key, m]));
+      let reviewed = 0; let cleared = 0; let kept = 0; let failed = '';
+      for (let i = 0; i < pending.length; i += 20) {
+        let reviews;
+        try { reviews = await reviewMarkers(pending.slice(i, i + 20), { model: EXPLAIN_MODEL, names: nameCache }); } catch (e) { failed = e.message; break; }
+        for (const r of reviews) {
+          const m = byKey.get(r.id);
+          // Weak-trust apps keep their marker even when the model calls them normal.
+          const verdict = r.verdict === 'normal' && !clearable(m) ? 'suspicious' : r.verdict;
+          const reason = verdict === r.verdict ? r.reason : `${r.reason} Kept for you: the app has weak trust (${m.tier}).`;
+          recordReview(r.id, { verdict, reason, model: EXPLAIN_MODEL });
+          reviewed += 1;
+          if (verdict === 'normal') cleared += 1; else kept += 1;
+        }
+        await saveHistory();
+      }
+      if (failed && !reviewed) throw new Error(failed);
+      reply(200, { reviewed, cleared, kept, skipped: pending.length - reviewed, error: failed || undefined, model: EXPLAIN_MODEL });
+    } catch (e) {
+      reply(502, { error: e.message });
+    } finally {
+      explaining = false;
+    }
     return;
   }
   if ((req.method === 'POST' && pathname === '/api/markers/accept') || (req.method === 'DELETE' && pathname === '/api/history')) {

@@ -12,10 +12,10 @@ function renderSecurityMarkers() {
   const routineNote = routineCount ? `<p class="security-routine">${routineCount} routine ${routineCount === 1 ? 'event' : 'events'} from macOS system services are folded on the Map tab.</p>` : '';
   if (!items.length) {
     const learning = Date.now() < (learningUntil || 0);
-    securityMarkers.innerHTML = `<div class="security-quiet"><span>NO CURRENT MARKERS</span><p>${learning ? 'The local baseline is still learning this Mac’s usual network activity.' : 'No attention markers are active. That is not a certificate that every connection is safe.'}</p></div>${routineNote}`;
+    securityMarkers.innerHTML = `${aiToolbar()}<div class="security-quiet"><span>NO CURRENT MARKERS</span><p>${learning ? 'The local baseline is still learning this Mac’s usual network activity.' : 'No attention markers are active. That is not a certificate that every connection is safe.'}</p></div>${routineNote}`;
     return;
   }
-  securityMarkers.innerHTML = items.slice(0, 12).map(([m, i]) => `<article class="security-marker" data-index="${i}" data-sev="${securityEsc(sevOf(m))}"><div><span>${securityEsc(KIND_LABEL[m.kind] || m.kind)} · ${securityEsc(SEV_LABEL[sevOf(m)])}</span><small>${securityEsc(new Date(m.at).toLocaleString([], {month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}))}</small></div><p>${securityEsc(m.text)}</p>${m.reason ? `<p class="security-reason">${securityEsc(m.reason)}</p>` : ''}<div class="security-marker-actions"><button type="button" data-action="map">Show on Map</button><button type="button" data-action="accept">Looks normal</button></div></article>`).join('') + routineNote;
+  securityMarkers.innerHTML = aiToolbar() + items.slice(0, 12).map(([m, i]) => `<article class="security-marker" data-index="${i}" data-sev="${securityEsc(sevOf(m))}"><div><span>${securityEsc(KIND_LABEL[m.kind] || m.kind)} · ${securityEsc(SEV_LABEL[sevOf(m)])}</span><small>${securityEsc(new Date(m.at).toLocaleString([], {month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}))}</small></div><p>${securityEsc(m.text)}</p>${m.reason ? `<p class="security-reason">${securityEsc(m.reason)}</p>` : ''}${aiNote(m)}<div class="security-marker-actions"><button type="button" data-action="map">Show on Map</button><button type="button" data-action="accept">Looks normal</button></div></article>`).join('') + routineNote;
 }
 
 function renderSecurityProcesses() {
