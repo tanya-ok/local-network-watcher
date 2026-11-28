@@ -171,6 +171,25 @@ export function aiCleared(now = Date.now()) {
   return state.markers.filter((m) => state.ai[m.key]?.verdict === 'normal' && state.accepted[m.key] && now - m.at < 7 * 24 * 3600 * 1000).map((m) => ({ ...m, ai: state.ai[m.key] }));
 }
 
+// Markers written before trust tiers existed, or while the process could not be read.
+export function staleTierApps() {
+  return [...new Set(currentMarkers().filter((m) => !m.tier || m.tier === 'unknown').map((m) => m.app).filter(Boolean))];
+}
+
+// Applies a fresh tier to an app's stale markers and drops their old model verdict so they are reviewed again.
+export function retier(app, tier) {
+  let changed = 0;
+  for (const m of state.markers) {
+    if (m.app !== app || (m.tier && m.tier !== 'unknown') || m.tier === tier) continue;
+    const [severity, reason] = severityFor(m.kind, tier, m.app, m.ip ? knownOwner(m.ip) : '');
+    Object.assign(m, { tier, severity, reason });
+    if (state.ai[m.key]?.verdict === 'suspicious') delete state.ai[m.key];
+    changed += 1;
+  }
+  if (changed) dirty = true;
+  return changed;
+}
+
 export function restore(key) {
   if (!state.ai[key] || state.ai[key].verdict !== 'normal') return false;
   delete state.accepted[key];

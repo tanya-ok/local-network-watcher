@@ -2,14 +2,14 @@ import { createServer } from 'node:http';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reverse } from 'node:dns/promises';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isIP } from 'node:net';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guard, isPaused, launchdLabel, logAction, processTable, treePreview } from './process-control.js';
-import { accept, aiCleared, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, recordReview, restore, saveHistory, summary } from './history.js';
+import { accept, aiCleared, retier, staleTierApps, appFirstSeen, currentMarkers, forgetHistory, loadHistory, observe, recordReview, restore, saveHistory, summary } from './history.js';
 import { clearable, reviewMarkers } from './ai-review.js';
 import { exePath, trustFacts } from './trust.js';
 import { tierOf } from './known.js';
@@ -403,6 +403,12 @@ const server = createServer(async (req, res) => {
     if (explaining) { reply(429, { error: 'The local model is busy. Try again in a moment.' }); return; }
     explaining = true;
     try {
+      let retiered = 0;
+      for (const app of staleTierApps().slice(0, 40)) {
+        const tier = await tierForApp(app);
+        if (tier && tier !== 'unknown') retiered += retier(app, tier);
+      }
+      if (retiered) await saveHistory();
       const pending = currentMarkers().filter((m) => !m.ai).slice(0, 200);
       const byKey = new Map(pending.map((m) => [m.key, m]));
       let reviewed = 0; let cleared = 0; let kept = 0; let failed = '';
@@ -421,7 +427,7 @@ const server = createServer(async (req, res) => {
         await saveHistory();
       }
       if (failed && !reviewed) throw new Error(failed);
-      reply(200, { reviewed, cleared, kept, skipped: pending.length - reviewed, error: failed || undefined, model: EXPLAIN_MODEL });
+      reply(200, { retiered, reviewed, cleared, kept, skipped: pending.length - reviewed, error: failed || undefined, model: EXPLAIN_MODEL });
     } catch (e) {
       reply(502, { error: e.message });
     } finally {
@@ -627,6 +633,22 @@ async function processTiers(rows) {
     if (path) tiers.set(pid, tierOf(await trustFacts(path)));
   }));
   return tiers;
+}
+
+// Finds the executable for an app name that has no tier yet: a running process first, then system folders.
+async function tierForApp(name) {
+  if (!/^[\w .+-]{1,80}$/.test(name)) return '';
+  let path = null;
+  try {
+    const { stdout } = await exec('/usr/bin/pgrep', ['-x', name], { timeout: 3000 });
+    const pid = Number(stdout.split('\n')[0]);
+    if (pid > 0) path = await exePath(pid);
+  } catch { /* not running */ }
+  for (const dir of ['/usr/libexec', '/usr/sbin', '/usr/bin', '/System/Library/CoreServices']) {
+    if (path) break;
+    try { await access(join(dir, name)); path = join(dir, name); } catch { /* not there */ }
+  }
+  return path ? tierOf(await trustFacts(path)) : '';
 }
 
 // Background sampling builds the local baseline even when the page is closed.
