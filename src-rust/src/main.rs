@@ -1,353 +1,1206 @@
+//! Local Network Watcher: one binary that collects, serves the page and answers its API on 127.0.0.1.
+
+mod ai;
+mod approval;
+mod capture;
+mod collector;
+mod control;
+mod daemon;
+mod dns;
+mod egress;
+mod facts;
+mod geoip;
+mod history;
+mod known;
+mod peer;
+mod settings;
+
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Default, Clone)]
-struct Socket {
-    pid: u32,
-    process: String,
-    protocol: String,
-    name: String,
-    state: String,
-}
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
-struct Connection {
-    pid: u32,
-    process: String,
-    protocol: String,
-    local: String,
-    remote: String,
-    state: String,
+struct AppState {
+    port: u16,
+    history: Arc<Mutex<history::History>>,
+    caches: Arc<facts::Caches>,
+    capture: capture::Capture,
+    explaining: Arc<AtomicBool>,
+    /// The egress proxy runs in the system daemon; this app only forwards to its socket.
+    egress_remote: bool,
 }
 
-#[derive(Clone)]
-struct ProcessTraffic {
-    pid: u32,
-    process: String,
-    user: String,
-    received_bytes: u64,
-    sent_bytes: u64,
-    received_packets: u64,
-    sent_packets: u64,
+type Reply = Response;
+
+fn reply(status: StatusCode, body: Value) -> Reply {
+    let mut response = (status, Json(body)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
-fn is_loopback(endpoint: &str) -> bool {
-    let Some(split) = endpoint.rfind(':') else {
-        return false;
+fn error(status: StatusCode, message: &str) -> Reply {
+    reply(status, json!({ "error": message }))
+}
+
+fn no_content() -> Reply {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Only pages served by this app on this port may change state.
+fn same_origin(headers: &HeaderMap, port: u16) -> bool {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
+}
+
+#[allow(clippy::result_large_err)] // the error is a ready HTTP response
+fn json_body(body: &Bytes, limit: usize) -> Result<Map<String, Value>, Reply> {
+    if body.len() > limit {
+        return Err(error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request is too large.",
+        ));
+    }
+    let text = if body.is_empty() {
+        b"{}".as_slice()
+    } else {
+        body.as_ref()
     };
-    let host = endpoint[..split].trim_matches(['[', ']']);
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    match serde_json::from_slice::<Value>(text) {
+        Ok(Value::Object(map)) => Ok(map),
+        _ => Err(error(StatusCode::BAD_REQUEST, "Expected a JSON object.")),
+    }
 }
 
-fn flush_socket(socket: &Socket, rows: &mut Vec<Connection>) {
-    if socket.name.is_empty() || socket.state == "LISTEN" || socket.state == "CLOSED" {
-        return;
+/// DNS rebinding guard: the Host header must name this machine on loopback.
+async fn host_guard(request: Request, next: Next) -> Reply {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let name = host.rsplit_once(':').map_or(host, |(n, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            n
+        } else {
+            host
+        }
+    });
+    if name != "localhost" && name != "127.0.0.1" {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Local access only",
+        )
+            .into_response();
     }
-    let Some(split) = socket.name.rfind("->") else {
-        return;
+    next.run(request).await
+}
+
+async fn collect() -> Result<collector::Snapshot, String> {
+    tokio::task::spawn_blocking(collector::snapshot)
+        .await
+        .map_err(|_| "collector stopped".to_string())?
+}
+
+async fn connections() -> Reply {
+    match collect().await {
+        Ok(snapshot) => reply(
+            StatusCode::OK,
+            serde_json::to_value(snapshot).unwrap_or_default(),
+        ),
+        Err(message) => reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "error": message, "sampledAt": history::now_ms(), "connections": [] }),
+        ),
+    }
+}
+
+async fn settings(State(s): State<AppState>) -> Reply {
+    let h = s.history.lock().await;
+    reply(
+        StatusCode::OK,
+        json!({
+            "learningUntil": h.learning_until(), "apps": h.app_count(), "file": h.file(),
+            "explainModel": ai::model(), "sampleSeconds": 15, "port": s.port, "tshark": capture::TSHARK,
+            "reverseDns": s.caches.reverse_dns(),
+        }),
+    )
+}
+
+async fn markers(State(s): State<AppState>) -> Reply {
+    let h = s.history.lock().await;
+    reply(
+        StatusCode::OK,
+        json!({
+            "learningUntil": h.learning_until(), "apps": h.app_count(), "file": h.file(), "markers": h.current_markers(), "aiCleared": h.ai_cleared(),
+        }),
+    )
+}
+
+async fn accept_marker(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Only this page can change the history.",
+        );
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
     };
-    let local = &socket.name[..split];
-    let remote = &socket.name[split + 2..];
-    if remote.is_empty() || remote == "*" || remote == "*:*" || is_loopback(remote) {
-        return;
+    let mut h = s.history.lock().await;
+    if !map
+        .get("key")
+        .and_then(Value::as_str)
+        .is_some_and(|k| h.accept(k))
+    {
+        return error(StatusCode::BAD_REQUEST, "Unknown marker.");
     }
-    rows.push(Connection {
-        pid: socket.pid,
-        process: if socket.process.is_empty() {
-            "Unknown process".into()
-        } else {
-            socket.process.clone()
-        },
-        protocol: socket.protocol.trim_start_matches('P').to_string(),
-        local: local.to_string(),
-        remote: remote.to_string(),
-        state: if socket.state.is_empty() {
-            "Open".into()
-        } else {
-            socket.state.clone()
-        },
-    });
+    let _ = h.save();
+    no_content()
 }
 
-fn parse_lsof(text: &str) -> Vec<Connection> {
-    let mut rows = Vec::new();
-    let mut socket: Option<Socket> = None;
-    for line in text.lines() {
-        if let Some(pid) = line.strip_prefix('p') {
-            if let Some(current) = &socket {
-                flush_socket(current, &mut rows);
-            }
-            socket = Some(Socket {
-                pid: pid.parse().unwrap_or_default(),
-                ..Socket::default()
-            });
-        } else if let Some(current) = socket.as_mut() {
-            if let Some(process) = line.strip_prefix('c') {
-                current.process = process.to_string();
-            } else if line.starts_with('f') {
-                flush_socket(current, &mut rows);
-                current.name.clear();
-                current.state.clear();
-            } else if let Some(protocol) = line.strip_prefix('P') {
-                current.protocol = protocol.to_string();
-            } else if let Some(name) = line.strip_prefix('n') {
-                current.name = name.to_string();
-            } else if let Some(state) = line.strip_prefix("TST=") {
-                current.state = state.to_string();
-            }
-        }
+/// Finds the executable for an app name with no tier yet: a running process first, then system folders.
+async fn tier_for_app(name: &str) -> Option<&'static str> {
+    if name.is_empty()
+        || name.len() > 80
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || " ._+-".contains(c))
+    {
+        return None;
     }
-    if let Some(current) = &socket {
-        flush_socket(current, &mut rows);
-    }
-    rows.sort_by(|a, b| a.process.cmp(&b.process).then(a.remote.cmp(&b.remote)));
-    rows.dedup_by(|a, b| {
-        a.pid == b.pid
-            && a.protocol == b.protocol
-            && a.local == b.local
-            && a.remote == b.remote
-            && a.state == b.state
-    });
-    rows.truncate(500);
-    rows
-}
-
-fn csv_fields(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut field = String::new();
-    let mut chars = line.chars().peekable();
-    let mut quoted = false;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                field.push('"');
-                chars.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => fields.push(std::mem::take(&mut field)),
-            _ => field.push(ch),
-        }
-    }
-    fields.push(field);
-    fields
-}
-
-fn process_names() -> HashMap<u32, (String, String)> {
-    let Ok(output) = Command::new("/bin/ps")
-        .args(["-Aww", "-o", "pid=,user=,comm="])
+    let mut path = None;
+    let pgrep = tokio::process::Command::new("/usr/bin/pgrep")
+        .args(["-x", name])
         .output()
-    else {
-        return HashMap::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (pid, rest) = line.trim().split_once(char::is_whitespace)?;
-            let pid = pid.parse::<u32>().ok()?;
-            // user first, then the full command path, which may contain spaces
-            let (user, command) = rest.trim().split_once(char::is_whitespace)?;
-            let name = command.trim().rsplit('/').next()?.to_string();
-            Some((pid, (name, user.trim().to_string())))
-        })
-        .collect()
+        .await;
+    if let Some(pid) = pgrep.ok().and_then(|out| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .and_then(|l| l.trim().parse::<u32>().ok())
+    }) {
+        path = control::exe_path(pid).await;
+    }
+    if path.is_none() {
+        path = [
+            "/usr/libexec",
+            "/usr/sbin",
+            "/usr/bin",
+            "/System/Library/CoreServices",
+        ]
+        .iter()
+        .map(|dir| format!("{dir}/{name}"))
+        .find(|p| std::path::Path::new(p).is_file());
+    }
+    let path = path.filter(|p| p.starts_with('/'))?;
+    Some(known::tier_of(&control::trust_facts(&path).await))
 }
 
-fn parse_nettop(text: &str, names: &HashMap<u32, (String, String)>) -> Vec<ProcessTraffic> {
-    let mut header = Vec::new();
-    let mut rows = Vec::new();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let fields = csv_fields(line);
-        if fields.first().is_some_and(|field| field.trim().is_empty()) {
-            header = fields;
-            continue;
+async fn analyze_markers(State(s): State<AppState>, headers: HeaderMap) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(StatusCode::FORBIDDEN, "Only this page can analyze markers.");
+    }
+    if s.explaining.swap(true, Ordering::SeqCst) {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "The local model is busy. Try again in a moment.",
+        );
+    }
+    let stale = s.history.lock().await.stale_tier_apps();
+    let mut retiered = 0;
+    for app in stale.iter().take(40) {
+        if let Some(tier) = tier_for_app(app).await.filter(|t| *t != "unknown") {
+            retiered += s.history.lock().await.retier(app, tier);
         }
-        if header.is_empty() || fields.is_empty() {
-            continue;
+    }
+    let (pending, names) = {
+        let h = s.history.lock().await;
+        let pending: Vec<history::Marker> = h
+            .current_markers()
+            .into_iter()
+            .filter(|m| m.ai.is_none())
+            .take(200)
+            .collect();
+        (pending, s.caches.names_snapshot())
+    };
+    let model = ai::model();
+    let (mut reviewed, mut cleared, mut kept) = (0, 0, 0);
+    let mut failed = String::new();
+    for batch in pending.chunks(20) {
+        let items: Vec<Value> = batch
+            .iter()
+            .map(|m| {
+                let ip = m.ip.clone().unwrap_or_default();
+                json!({
+                    "id": m.key, "app": m.app, "tier": if m.tier.is_empty() { "unknown" } else { &m.tier },
+                    "kind": m.kind, "severity": m.severity, "destination": m.dest.clone().unwrap_or_default(),
+                    "ip": ip, "reverseDns": names.get(&ip).cloned().unwrap_or_default(), "event": m.text, "reason": m.reason,
+                })
+            })
+            .collect();
+        let reviews = match tokio::task::spawn_blocking(move || ai::review_markers(items)).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(message)) => {
+                failed = message;
+                break;
+            }
+            Err(_) => {
+                failed = "The local model did not answer".into();
+                break;
+            }
+        };
+        let mut h = s.history.lock().await;
+        for (id, verdict, reason) in reviews {
+            let Some(m) = batch.iter().find(|m| m.key == id) else {
+                continue;
+            };
+            // Weak-trust apps keep their marker even when the model calls them normal.
+            let (verdict, reason) = if verdict == "normal" && !ai::clearable(&m.tier) {
+                (
+                    "suspicious".to_string(),
+                    format!(
+                        "{reason} Kept for you: the app has weak trust ({}).",
+                        m.tier
+                    ),
+                )
+            } else {
+                (verdict, reason)
+            };
+            if verdict == "normal" {
+                cleared += 1
+            } else {
+                kept += 1
+            }
+            reviewed += 1;
+            h.record_review(
+                &id,
+                history::AiReview {
+                    verdict,
+                    reason,
+                    model: model.clone(),
+                    at: history::now_ms(),
+                },
+            );
         }
-        let Some((raw_name, pid)) = fields[0].trim().rsplit_once('.') else {
-            continue;
-        };
-        let Ok(pid) = pid.parse::<u32>() else {
-            continue;
-        };
-        let value = |column: &str| -> u64 {
-            header
-                .iter()
-                .position(|name| name == column)
-                .and_then(|index| fields.get(index))
-                .and_then(|field| field.trim().parse().ok())
-                .unwrap_or_default()
-        };
-        let process = names
-            .get(&pid)
-            .map(|details| details.0.clone())
-            .unwrap_or_else(|| raw_name.trim_end_matches('.').to_string());
-        let user = names
-            .get(&pid)
-            .map(|details| details.1.clone())
-            .unwrap_or_default();
-        rows.push(ProcessTraffic {
-            pid,
-            process,
-            user,
-            received_bytes: value("bytes_in"),
-            sent_bytes: value("bytes_out"),
-            received_packets: value("packets_in"),
-            sent_packets: value("packets_out"),
+        let _ = h.save();
+    }
+    {
+        let _ = s.history.lock().await.save();
+    }
+    s.explaining.store(false, Ordering::SeqCst);
+    if !failed.is_empty() && reviewed == 0 {
+        return error(StatusCode::BAD_GATEWAY, &failed);
+    }
+    reply(
+        StatusCode::OK,
+        json!({ "retiered": retiered, "reviewed": reviewed, "cleared": cleared, "kept": kept,
+                "skipped": pending.len() - reviewed, "error": if failed.is_empty() { Value::Null } else { Value::String(failed) }, "model": model }),
+    )
+}
+
+async fn restore_marker(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Only this page can change the history.",
+        );
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let mut h = s.history.lock().await;
+    if !map
+        .get("key")
+        .and_then(Value::as_str)
+        .is_some_and(|k| h.restore(k))
+    {
+        return error(StatusCode::BAD_REQUEST, "Nothing to restore.");
+    }
+    let _ = h.save();
+    reply(StatusCode::OK, json!({ "ok": true }))
+}
+
+async fn forget_history(State(s): State<AppState>, headers: HeaderMap) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Only this page can change the history.",
+        );
+    }
+    let _ = s.history.lock().await.forget();
+    no_content()
+}
+
+async fn owner(State(s): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Reply {
+    let ip = q.get("ip").map(String::as_str).unwrap_or("");
+    if !facts::valid_ip(ip) {
+        return reply(StatusCode::BAD_REQUEST, json!({}));
+    }
+    let (mut owner, name) = tokio::join!(s.caches.owner(ip), s.caches.reverse_name(ip));
+    owner.reverse_dns = name;
+    reply(
+        StatusCode::OK,
+        serde_json::to_value(owner).unwrap_or_default(),
+    )
+}
+
+async fn names(State(s): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Reply {
+    let ips: Vec<String> = q
+        .get("ips")
+        .map(|v| {
+            v.split(',')
+                .filter(|ip| facts::valid_ip(ip))
+                .take(60)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut tasks = tokio::task::JoinSet::new();
+    for ip in ips {
+        let caches = s.caches.clone();
+        tasks.spawn(async move {
+            let name = caches.reverse_name(&ip).await;
+            (ip, name)
         });
     }
-    rows.sort_by(|a, b| (b.received_bytes + b.sent_bytes).cmp(&(a.received_bytes + a.sent_bytes)));
-    rows.dedup_by_key(|row| row.pid);
-    rows
+    let mut out = Map::new();
+    while let Some(Ok((ip, name))) = tasks.join_next().await {
+        out.insert(ip, Value::String(name));
+    }
+    reply(StatusCode::OK, Value::Object(out))
 }
 
-fn all_processes(
-    names: &HashMap<u32, (String, String)>,
-    traffic: &[ProcessTraffic],
-) -> Vec<ProcessTraffic> {
-    let traffic_by_pid: HashMap<u32, &ProcessTraffic> =
-        traffic.iter().map(|row| (row.pid, row)).collect();
-    let mut rows = names
-        .iter()
-        .map(|(pid, (process, user))| {
-            traffic_by_pid.get(pid).map_or_else(
-                || ProcessTraffic {
-                    pid: *pid,
-                    process: process.clone(),
-                    user: user.clone(),
-                    received_bytes: 0,
-                    sent_bytes: 0,
-                    received_packets: 0,
-                    sent_packets: 0,
-                },
-                |row| (**row).clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|a, b| {
-        (b.received_bytes + b.sent_bytes)
-            .cmp(&(a.received_bytes + a.sent_bytes))
-            .then_with(|| a.pid.cmp(&b.pid))
-    });
-    rows
+async fn route(Query(q): Query<HashMap<String, String>>) -> Reply {
+    let ip = q.get("ip").map(String::as_str).unwrap_or("");
+    if ip.parse::<std::net::IpAddr>().is_err() {
+        return error(StatusCode::BAD_REQUEST, "A numeric IP address is required.");
+    }
+    match facts::route(ip).await {
+        Some(r) => reply(StatusCode::OK, serde_json::to_value(r).unwrap_or_default()),
+        None => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "macOS route information is unavailable for this endpoint.",
+        ),
+    }
 }
 
-fn json_string(value: &str) -> String {
-    let mut output = String::with_capacity(value.len() + 2);
-    output.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            c if c.is_control() => output.push_str(&format!("\\u{:04x}", c as u32)),
-            c => output.push(c),
+async fn process(Query(q): Query<HashMap<String, String>>) -> Reply {
+    let pid = q
+        .get("pid")
+        .and_then(|p| p.parse::<u32>().ok())
+        .filter(|p| *p > 0);
+    match pid {
+        Some(pid) => match facts::process_facts(pid).await {
+            Some(f) => {
+                let mut v = serde_json::to_value(f).unwrap_or_default();
+                let stat = control::process_table()
+                    .await
+                    .into_iter()
+                    .find(|r| r.pid == pid)
+                    .map(|r| r.stat)
+                    .unwrap_or_default();
+                v["paused"] = Value::Bool(control::is_paused(&stat));
+                v["launchd"] = control::launchd_label(pid).await;
+                reply(StatusCode::OK, v)
+            }
+            None => error(StatusCode::NOT_FOUND, "Process not found."),
+        },
+        None => error(StatusCode::NOT_FOUND, "Process not found."),
+    }
+}
+
+/// stop, pause, resume or restart a process the user owns, after an explicit confirmation in the page.
+async fn process_control(
+    State(s): State<AppState>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
+    if !["stop", "pause", "resume", "restart"].contains(&action.as_str()) {
+        return error(StatusCode::NOT_FOUND, "Unknown process action.");
+    }
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 8192) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match control::control(&action, &map).await {
+        Ok(v) => reply(StatusCode::ACCEPTED, v),
+        Err(message) => {
+            control::log_action(json!({
+                "action": action, "pid": map.get("pid").cloned().unwrap_or(Value::Null),
+                "tree": map.get("tree") == Some(&Value::Bool(true)), "result": "refused", "error": message,
+            }));
+            error(StatusCode::BAD_REQUEST, &message)
         }
     }
-    output.push('"');
-    output
 }
 
-fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|_| format!("Could not run {program}."))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+async fn egress_status(State(s): State<AppState>) -> Reply {
+    if !s.egress_remote {
+        let mut st = egress::status();
+        st["mode"] = json!("in-process");
+        return reply(StatusCode::OK, st);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    match daemon::call(json!({ "op": "status" })).await {
+        Ok(r) => reply(StatusCode::OK, r["status"].clone()),
+        Err(e) => reply(
+            StatusCode::BAD_GATEWAY,
+            json!({ "mode": "daemon", "unreachable": true, "error": e }),
+        ),
+    }
 }
 
-fn main() {
+/// enable, pause, rule, ports, approve, deny. The Origin check only stops other web pages; who may change rules is decided from the kernel uid of the TCP client.
+async fn egress_change(
+    State(s): State<AppState>,
+    axum::extract::ConnectInfo(client): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Path(action): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let server = std::net::SocketAddr::from(([127, 0, 0, 1], s.port));
+    let (uid, user) = egress::client_account(client, server).await;
+    let id = map
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let resolve = matches!(action.as_str(), "approve" | "deny");
+    let (result, status) = if s.egress_remote {
+        let mut req = if resolve {
+            json!({ "op": action, "id": id })
+        } else {
+            json!({ "op": "change", "action": action, "input": Value::Object(map.clone()) })
+        };
+        if uid == peer::UNKNOWN_UID {
+            req["forClient"] = json!({ "port": client.port(), "serverPort": s.port });
+        } else {
+            req["forUid"] = json!(uid);
+        }
+        match daemon::call(req).await {
+            Ok(r) if r["ok"] == json!(true) => (Ok(r["result"].clone()), r["status"].clone()),
+            Ok(r) => (
+                Err(r["error"]
+                    .as_str()
+                    .unwrap_or("The change was not applied.")
+                    .to_string()),
+                Value::Null,
+            ),
+            Err(e) => (Err(e), Value::Null),
+        }
+    } else {
+        let result = if resolve {
+            egress::resolve(uid, &id, action == "approve").await
+        } else {
+            match approval::Change::parse(&action, &map) {
+                Ok(c) => egress::request(uid, c).await,
+                Err(e) => Err(e),
+            }
+        };
+        let mut st = egress::status();
+        st["mode"] = json!("in-process");
+        (result, st)
+    };
+    let outcome = match result {
+        Ok(o) => o,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    control::log_action(json!({
+        "type": "egress", "path": format!("/api/egress/{action}"), "input": Value::Object(map),
+        "client": { "uid": uid, "user": user }, "outcome": outcome,
+    }));
+    let mut status = status;
+    status["outcome"] = outcome;
+    reply(StatusCode::OK, status)
+}
+
+fn query_pid(q: &HashMap<String, String>) -> u32 {
+    q.get("pid")
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+async fn process_tree(Query(q): Query<HashMap<String, String>>) -> Reply {
+    match control::tree_preview(query_pid(&q)).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+async fn process_trust(
+    State(s): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Reply {
+    let pid = query_pid(&q);
+    let path = if pid > 0 {
+        control::exe_path(pid).await
+    } else {
+        None
+    };
+    let Some(path) = path.filter(|p| p.starts_with('/')) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "Executable path not visible for this process.",
+        );
+    };
+    let mut facts = control::trust_facts(&path).await;
+    let app = q.get("app").map(String::as_str).unwrap_or("");
+    facts["firstSeen"] = json!(s.history.lock().await.app_first_seen(app));
+    reply(StatusCode::OK, facts)
+}
+
+async fn persistence() -> Reply {
+    let connections = collect().await.map(|s| s.connections).unwrap_or_default();
+    reply(
+        StatusCode::OK,
+        control::persistence_items(&connections).await,
+    )
+}
+
+async fn persistence_job(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 4096) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let action = map.get("action").and_then(Value::as_str).unwrap_or("");
+    if map.get("confirm") != Some(&Value::Bool(true))
+        || !["stop", "disable", "enable"].contains(&action)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "A confirmed action of stop, disable or enable is required.",
+        );
+    }
+    let file = map.get("file").and_then(Value::as_str).unwrap_or("");
+    match control::change_job(action, file).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+async fn explain(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Explanations can only be requested from this page.",
+        );
+    }
+    let map = match json_body(&body, 4096) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if s.explaining.swap(true, Ordering::SeqCst) {
+        return error(StatusCode::TOO_MANY_REQUESTS, "One explanation at a time.");
+    }
+    let facts = ai::facts_from(&map, None);
+    let result =
+        tokio::task::spawn_blocking(move || ai::chat(ai::EXPLAIN_SYSTEM, &facts, 400)).await;
+    s.explaining.store(false, Ordering::SeqCst);
+    match result {
+        Ok(Ok(text)) => reply(
+            StatusCode::OK,
+            json!({ "text": text, "model": ai::model() }),
+        ),
+        Ok(Err(message)) => error(StatusCode::BAD_GATEWAY, &message),
+        Err(_) => error(StatusCode::BAD_GATEWAY, "The local model did not answer"),
+    }
+}
+
+async fn models() -> Reply {
+    match tokio::task::spawn_blocking(ai::models).await {
+        Ok(Ok(list)) => reply(
+            StatusCode::OK,
+            json!({ "models": list, "defaultModel": ai::model() }),
+        ),
+        _ => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Ollama is not reachable on this Mac.",
+        ),
+    }
+}
+
+async fn ask(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 2048) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let question = map
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if question.is_empty() || question.chars().count() > 1200 {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "Enter a question up to 1,200 characters.",
+        );
+    }
+    let context = match map.get("context") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(c)) => c.clone(),
+        Some(_) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "Connection context must be an object.",
+            );
+        }
+    };
+    let facts = ai::facts_from(
+        &context,
+        Some(&["process", "pid", "protocol", "local", "remote", "state"]),
+    );
+    let user = if facts.is_empty() {
+        format!("Question: {question}")
+    } else {
+        format!("Question: {question}\n\nSelected local connection facts:\n{facts}")
+    };
+    match tokio::task::spawn_blocking(move || ai::chat(ai::ASK_SYSTEM, &user, 350)).await {
+        Ok(Ok(text)) => reply(
+            StatusCode::OK,
+            json!({ "text": text, "model": ai::model() }),
+        ),
+        Ok(Err(message)) => error(StatusCode::BAD_GATEWAY, &format!("{message}.")),
+        Err(_) => error(StatusCode::BAD_GATEWAY, "The local model did not answer."),
+    }
+}
+
+async fn capture_interfaces() -> Reply {
+    match capture::interfaces().await {
+        Ok(list) => reply(
+            StatusCode::OK,
+            serde_json::to_value(list).unwrap_or_default(),
+        ),
+        Err(message) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("TShark is not available: {message}"),
+        ),
+    }
+}
+
+async fn capture_get(State(s): State<AppState>) -> Reply {
+    reply(
+        StatusCode::OK,
+        serde_json::to_value(s.capture.view()).unwrap_or_default(),
+    )
+}
+
+async fn capture_start(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Capture can only be controlled from this page.",
+        );
+    }
+    let map = match json_body(&body, 2048) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if map.get("confirm") != Some(&Value::Bool(true)) {
+        return error(StatusCode::BAD_REQUEST, "Confirmation required.");
+    }
+    let iface = map.get("interface").and_then(Value::as_str).unwrap_or("");
+    let seconds = map.get("seconds").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let filter = match map.get("displayFilter") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(f)) => f.as_str(),
+        Some(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Display filter must be one line and 500 characters or fewer.",
+            );
+        }
+    };
+    match s.capture.start(iface, seconds, filter).await {
+        Ok(()) => reply(StatusCode::ACCEPTED, json!({ "status": "started" })),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+async fn capture_clear(State(s): State<AppState>, headers: HeaderMap) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Capture can only be controlled from this page.",
+        );
+    }
+    s.capture.clear();
+    no_content()
+}
+
+async fn set_reverse_dns(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Reply {
+    if !same_origin(&headers, s.port) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let map = match json_body(&body, 1024) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let Some(enabled) = map.get("enabled").and_then(Value::as_bool) else {
+        return error(StatusCode::BAD_REQUEST, "enabled must be true or false.");
+    };
+    s.caches.set_reverse_dns(enabled);
+    // The setting still applies until restart when the file cannot be written.
+    let _ = settings::save_reverse_dns(enabled);
+    reply(StatusCode::OK, json!({ "reverseDns": enabled }))
+}
+
+async fn home_estimate() -> Reply {
+    reply(StatusCode::OK, settings::home_estimate())
+}
+
+fn host_of_remote(remote: &str) -> &str {
+    if let Some(rest) = remote.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or_default();
+    }
+    match (remote.find(':'), remote.rfind(':')) {
+        (Some(a), Some(b)) if a == b && a > 0 => &remote[..a],
+        _ => remote,
+    }
+}
+
+fn domain_of(name: &str) -> String {
+    let parts: Vec<&str> = name.trim_end_matches('.').split('.').collect();
+    parts[parts.len().saturating_sub(2)..].join(".")
+}
+
+/// Current destinations with offline coordinates for the Star Atlas.
+async fn atlas(State(s): State<AppState>) -> Reply {
+    let snapshot = match collect().await {
+        Ok(snap) => snap,
+        Err(message) => {
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": message, "geoip": "unknown", "destinations": [] }),
+            );
+        }
+    };
+    struct Dest {
+        processes: Vec<String>,
+        pids: Vec<u32>,
+        ports: Vec<String>,
+        count: u32,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by_ip: HashMap<String, Dest> = HashMap::new();
+    for row in &snapshot.connections {
+        let ip = host_of_remote(&row.remote).to_string();
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            continue;
+        }
+        let d = by_ip.entry(ip.clone()).or_insert_with(|| {
+            order.push(ip.clone());
+            Dest {
+                processes: vec![],
+                pids: vec![],
+                ports: vec![],
+                count: 0,
+            }
+        });
+        let port = row
+            .remote
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if !d.processes.contains(&row.process) {
+            d.processes.push(row.process.clone());
+        }
+        if !d.pids.contains(&row.pid) {
+            d.pids.push(row.pid);
+        }
+        if !d.ports.contains(&port) {
+            d.ports.push(port);
+        }
+        d.count += 1;
+    }
+    let lookup_ips = order.clone();
+    let geo = tokio::task::spawn_blocking(move || geoip::lookup(&lookup_ips))
+        .await
+        .unwrap_or(geoip::Lookup {
+            status: "error",
+            error: Some("GeoIP lookup stopped".into()),
+            places: HashMap::new(),
+        });
+    let mut tasks = tokio::task::JoinSet::new();
+    for ip in order.iter().filter(|ip| !geoip::is_non_public(ip)).cloned() {
+        let caches = s.caches.clone();
+        tasks.spawn(async move {
+            let name = caches.reverse_name(&ip).await;
+            (ip, name)
+        });
+    }
+    let mut names = HashMap::new();
+    while let Some(Ok((ip, name))) = tasks.join_next().await {
+        names.insert(ip, name);
+    }
+    let destinations: Vec<Value> = order
+        .iter()
+        .map(|ip| {
+            let d = &by_ip[ip];
+            let name = names.get(ip).cloned().unwrap_or_default();
+            let place = geo.places.get(ip);
+            json!({
+                "ip": ip, "domain": if name.is_empty() { String::new() } else { domain_of(&name) }, "name": name,
+                "local": geoip::is_non_public(ip), "processes": d.processes, "pids": d.pids, "ports": d.ports,
+                "connections": d.count, "lat": place.map(|p| p.lat), "lon": place.map(|p| p.lon),
+                "city": place.map(|p| p.city.as_str()).unwrap_or(""), "country": place.map(|p| p.country.as_str()).unwrap_or(""),
+            })
+        })
+        .collect();
+    reply(
+        StatusCode::OK,
+        json!({
+            "sampledAt": snapshot.sampled_at, "geoip": geo.status, "geoipError": geo.error,
+            "attribution": { "text": "IP geolocation by DB-IP.com", "url": "https://db-ip.com", "license": "CC BY 4.0" },
+            "destinations": destinations,
+        }),
+    )
+}
+
+// The page ships inside the binary: nothing is read from disk at request time.
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (
+        "index.html",
+        "text/html; charset=utf-8",
+        include_bytes!("../../public/index.html"),
+    ),
+    (
+        "app.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/app.js"),
+    ),
+    (
+        "howitworks.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/howitworks.js"),
+    ),
+    (
+        "console.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/console.js"),
+    ),
+    (
+        "flight-map.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/flight-map.js"),
+    ),
+    (
+        "security.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/security.js"),
+    ),
+    (
+        "persistence-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/persistence-view.js"),
+    ),
+    (
+        "persistence.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/persistence.css"),
+    ),
+    (
+        "styles.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/styles.css"),
+    ),
+    (
+        "theme.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/theme.css"),
+    ),
+    (
+        "console.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/console.css"),
+    ),
+    (
+        "security.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/security.css"),
+    ),
+    (
+        "packet-details.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/packet-details.css"),
+    ),
+    (
+        "process-table.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/process-table.css"),
+    ),
+    (
+        "egress-view.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/egress-view.js"),
+    ),
+    (
+        "egress.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/egress.css"),
+    ),
+    (
+        "star-atlas.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../public/star-atlas.js"),
+    ),
+    (
+        "star-atlas.css",
+        "text/css; charset=utf-8",
+        include_bytes!("../../public/star-atlas.css"),
+    ),
+];
+
+async fn static_file(method: Method, request: Request) -> Reply {
+    if method != Method::GET && method != Method::HEAD {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET")],
+            "Read-only monitor",
+        )
+            .into_response();
+    }
+    let path = request.uri().path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    match ASSETS.iter().find(|(name, _, _)| *name == path) {
+        Some((_, content_type, body)) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, *content_type),
+                (header::CACHE_CONTROL, "no-store"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            *body,
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Not found",
+        )
+            .into_response(),
+    }
+}
+
+/// Trust tier per PID, from the executable path and signature. Paths are cached per PID and name.
+async fn process_tiers(
+    snapshot: &collector::Snapshot,
+    paths: &mut HashMap<(u32, String), Option<String>>,
+) -> HashMap<u32, &'static str> {
+    let mut pids: Vec<(u32, String)> = Vec::new();
+    let rows = snapshot
+        .connections
+        .iter()
+        .map(|r| (r.pid, &r.process))
+        .chain(snapshot.processes.iter().map(|p| (p.pid, &p.process)));
+    for (pid, name) in rows {
+        if pid > 0 && !pids.iter().any(|(p, _)| *p == pid) {
+            pids.push((pid, name.clone()));
+        }
+        if pids.len() >= 80 {
+            break;
+        }
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for (pid, name) in pids {
+        let cached = paths.get(&(pid, name.clone())).cloned();
+        tasks.spawn(async move {
+            let path = match cached {
+                Some(p) => p,
+                None => control::exe_path(pid).await,
+            };
+            let tier = match &path {
+                Some(p) => known::tier_of(&control::trust_facts(p).await),
+                None => "unknown",
+            };
+            (pid, name, path, tier)
+        });
+    }
+    let mut tiers = HashMap::new();
+    while let Some(Ok((pid, name, path, tier))) = tasks.join_next().await {
+        if paths.len() > 1000 {
+            paths.clear();
+        }
+        paths.insert((pid, name), path);
+        tiers.insert(pid, tier);
+    }
+    tiers
+}
+
+/// Background sampling builds the local baseline even when the page is closed.
+async fn sampler(state: AppState) {
+    let mut tick = tokio::time::interval(Duration::from_secs(15));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut paths = HashMap::new();
+    loop {
+        tick.tick().await;
+        let Ok(snapshot) = collect().await else {
+            continue;
+        };
+        let mut ips: Vec<String> = snapshot
+            .connections
+            .iter()
+            .map(|r| {
+                let host = r
+                    .remote
+                    .rfind(':')
+                    .map_or(r.remote.as_str(), |i| &r.remote[..i]);
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .collect();
+        ips.sort();
+        ips.dedup();
+        for ip in ips.iter().take(80) {
+            state.caches.reverse_name(ip).await;
+        }
+        let tiers = process_tiers(&snapshot, &mut paths).await;
+        let names = state.caches.names_snapshot();
+        let mut h = state.history.lock().await;
+        h.observe(&snapshot, &names, &tiers, history::now_ms());
+        if let Err(e) = h.save() {
+            eprintln!("Could not save history: {e}");
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
     if !cfg!(target_os = "macos") {
-        eprintln!("This first version reads macOS network activity only.");
+        eprintln!("Local Network Watcher reads macOS network activity only.");
         std::process::exit(2);
     }
-    let names = process_names();
-    let connections = match run("/usr/sbin/lsof", &["-nP", "-i", "-FpcPTn"]) {
-        Ok(text) => parse_lsof(&text),
-        Err(error) => {
-            eprintln!("Could not read open network connections: {error}");
-            std::process::exit(3);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("egress-daemon") => {
+            daemon::run().await;
+            return;
+        }
+        Some("egress") => std::process::exit(daemon::cli(&args[1..]).await),
+        _ => {}
+    }
+    if std::env::args().any(|a| a == "--snapshot") {
+        match collector::snapshot() {
+            Ok(s) => println!("{}", serde_json::to_string(&s).unwrap_or_default()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(3);
+            }
+        }
+        return;
+    }
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4317);
+    let state = AppState {
+        port,
+        history: Arc::new(Mutex::new(history::History::load())),
+        caches: Arc::new(facts::Caches::default()),
+        capture: capture::Capture::new(),
+        explaining: Arc::new(AtomicBool::new(false)),
+        egress_remote: daemon::available(),
+    };
+    state.caches.set_reverse_dns(settings::load_reverse_dns());
+    tokio::spawn(sampler(state.clone()));
+    if state.egress_remote {
+        println!(
+            "Egress runs in the system daemon at {}; local proxy listeners stay off.",
+            daemon::socket_path().display()
+        );
+    } else {
+        egress::init().await;
+    }
+
+    let app = Router::new()
+        .route("/api/connections", get(connections))
+        .route("/api/settings", get(settings))
+        .route("/api/settings/reverse-dns", post(set_reverse_dns))
+        .route("/api/home-estimate", get(home_estimate))
+        .route("/api/atlas", get(atlas))
+        .route("/api/markers", get(markers))
+        .route("/api/markers/accept", post(accept_marker))
+        .route("/api/markers/analyze", post(analyze_markers))
+        .route("/api/markers/restore", post(restore_marker))
+        .route("/api/history", axum::routing::delete(forget_history))
+        .route("/api/owner", get(owner))
+        .route("/api/names", get(names))
+        .route("/api/route", get(route))
+        .route("/api/process", get(process))
+        .route("/api/process/tree", get(process_tree))
+        .route("/api/process/trust", get(process_trust))
+        .route("/api/process/{action}", post(process_control))
+        .route("/api/egress", get(egress_status))
+        .route("/api/egress/{action}", post(egress_change))
+        .route("/api/persistence", get(persistence))
+        .route("/api/persistence/job", post(persistence_job))
+        .route("/api/explain", post(explain))
+        .route("/api/models", get(models))
+        .route("/api/ask", post(ask))
+        .route("/api/capture/interfaces", get(capture_interfaces))
+        .route(
+            "/api/capture",
+            get(capture_get).post(capture_start).delete(capture_clear),
+        )
+        .fallback(static_file)
+        .layer(DefaultBodyLimit::max(8 * 1024))
+        .layer(middleware::from_fn(host_guard))
+        .with_state(state);
+
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Could not listen on 127.0.0.1:{port}: {e}");
+            std::process::exit(1);
         }
     };
-    let (processes, metrics_warning) = match run(
-        "/usr/bin/nettop",
-        &[
-            "-P",
-            "-L",
-            "1",
-            "-n",
-            "-x",
-            "-J",
-            "packets_in,bytes_in,packets_out,bytes_out",
-        ],
-    ) {
-        Ok(text) => (parse_nettop(&text, &names), None),
-        Err(error) => (Vec::new(), Some(error)),
+    println!("Local Network Watcher is listening at http://127.0.0.1:{port}");
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
     };
-    let all_processes = all_processes(&names, &processes);
-    let sampled_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let connection_rows = connections
-        .iter()
-        .map(|row| {
-            format!(
-                "{{\"pid\":{},\"process\":{},\"protocol\":{},\"local\":{},\"remote\":{},\"state\":{}}}",
-                row.pid,
-                json_string(&row.process),
-                json_string(&row.protocol),
-                json_string(&row.local),
-                json_string(&row.remote),
-                json_string(&row.state)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let process_rows = processes
-        .iter()
-        .map(|row| {
-            format!(
-                "{{\"pid\":{},\"process\":{},\"user\":{},\"receivedBytes\":{},\"sentBytes\":{},\"receivedPackets\":{},\"sentPackets\":{}}}",
-                row.pid,
-                json_string(&row.process),
-                json_string(&row.user),
-                row.received_bytes,
-                row.sent_bytes,
-                row.received_packets,
-                row.sent_packets
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let all_process_rows = all_processes
-        .iter()
-        .map(|row| {
-            format!(
-                "{{\"pid\":{},\"process\":{},\"user\":{},\"receivedBytes\":{},\"sentBytes\":{},\"receivedPackets\":{},\"sentPackets\":{}}}",
-                row.pid,
-                json_string(&row.process),
-                json_string(&row.user),
-                row.received_bytes,
-                row.sent_bytes,
-                row.received_packets,
-                row.sent_packets
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let warning = metrics_warning
-        .as_deref()
-        .map(json_string)
-        .unwrap_or_else(|| "null".to_string());
-    println!(
-        "{{\"sampledAt\":{},\"source\":\"macOS nettop + lsof · Rust core\",\"refreshSeconds\":3,\"connections\":[{}],\"processes\":[{}],\"allProcesses\":[{}],\"metricsWarning\":{}}}",
-        sampled_at, connection_rows, process_rows, all_process_rows, warning
-    );
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    {
+        eprintln!("Server stopped: {e}");
+    }
 }

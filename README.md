@@ -1,23 +1,32 @@
 # Local Network Watcher
 
-![Where things go — an illustrative view of local network activity](docs/images/readme-hero.svg)
+![Where things go: an illustrative view of local network activity](docs/images/readme-hero.svg)
 
 *Illustrative UI artwork with synthetic labels, not a live snapshot from a specific Mac.*
 
 *A live view of connections open on this Mac.*
 
+Site: <https://tanya-ok.github.io/local-network-watcher/> · Security: [SECURITY.md](SECURITY.md)
+
 Local Network Watcher is a local-first macOS network observatory. It shows open process-to-endpoint connections, process-level traffic counters, connection changes, a live route diagram, and selected packet fields from an optional TShark capture. It is designed to help people understand and investigate network activity; a new connection or unusual pattern is a prompt to inspect, not proof of malicious behavior.
 
 ## Run
 
-Requires Rust 1.85 or newer, Node.js 20 or newer, and macOS. The monitor and socket parser run in Rust; the local web preview is served by Node.js.
+Requires macOS and Rust 1.85 or newer. It is one Rust binary: it collects, serves the page (built into the binary) and answers its API on `127.0.0.1` only.
 
 ```sh
-cargo build
-npm start
+cargo run --release
 ```
 
 Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to use another local port.
+
+### As a Dock app
+
+```sh
+./scripts/macos/install-app.sh --dock
+```
+
+This builds the release binary and installs `~/Applications/Local Network Watcher.app` with the binary inside it. The app starts the server if it is not running and opens the page in a Brave app window, or in the default browser. The server keeps running after the window closes; the log is `~/Library/Logs/LocalNetworkWatcher.log`. `--dock` adds the app to the Dock once. Rerun the script after pulling changes.
 
 ## What it observes
 
@@ -34,8 +43,21 @@ Open <http://127.0.0.1:4317>. The server binds to loopback only. Set `PORT` to u
   - Restart: only for launchd jobs found in `launchctl print gui/<uid>`, using `launchctl kickstart -k`. Unavailable for other processes, including GUI app instances registered by LaunchServices.
 - Every process action, including refusals, is appended as one JSON line to `actions.log` in the data folder (`LOCAL_WATCH_DATA` or `~/Library/Application Support/LocalWatch`), file mode 0600.
 - Process control does not block network access. Network isolation is not implemented.
-- **Egress** is an optional local proxy, off by default. It listens on loopback with two profiles: open (`127.0.0.1:4318`, everything passes except blocked domains) and strict (`127.0.0.1:4319`, only the allow list passes). Both always refuse a built-in list of hosted AI services and trackers, and refuse local network addresses. Each request is appended to `egress.log` in the data folder (host, port, result, reason, bytes), file mode 0600. Request contents are not read: HTTPS passes as an opaque tunnel. Only programs configured to use the proxy are covered; it does not force other traffic through itself.
+- **Egress** is an optional local proxy, off by default. It listens on loopback with two profiles: open (`127.0.0.1:4318`, everything passes except blocked domains) and strict (`127.0.0.1:4319`, only the allow list passes); `LOCAL_WATCH_EGRESS_OPEN_PORT` and `LOCAL_WATCH_EGRESS_STRICT_PORT` change the ports. Both always refuse a built-in list of hosted AI services and trackers, and refuse local network addresses. The policy is `egress.json` in the data folder. Each request is appended to `egress.log` in the data folder (host, port, result, reason, bytes), file mode 0600. Request contents are not read: HTTPS passes as an opaque tunnel. Only programs configured to use the proxy are covered; it does not force other traffic through itself. If a port is taken, the Egress tab shows which profile did not start. Only destination ports on the allowed list pass (80 and 443 by default, editable on the Egress tab). A direct IP address is refused unless that exact public address is on the allow list, because domain lists cannot judge a bare address. `egress.log` rotates at 5 MB and keeps the last 3 files.
 - This version does not enforce firewall rules or identify a connection as malicious.
+
+## Egress daemon
+
+For a Mac where another account (for example an AI agent account) must reach the network only through the proxy, the proxy can run as a system service under its own hidden account.
+
+- `local-network-watcher egress-daemon` runs only the two proxy listeners and a control socket (`/var/run/local-watch-egress/control.sock`, `LOCAL_WATCH_EGRESS_SOCKET`). Its data dir is `/Library/Application Support/LocalWatchEgress` (`LOCAL_WATCH_EGRESS_DATA`), mode 0700, with `egress.json` and `egress.log` at 0600, owned by the service account. Other accounts cannot read the journal files.
+- Install: `sudo scripts/macos/install-egress-daemon.sh [--dns]` after `cargo build --release --locked`. It creates `_localwatch` (hidden, uid below 500, no shell), installs the binary root-owned to `/usr/local/libexec/local-watch-egress/`, and bootstraps `com.localwatch.egress` (RunAtLoad, KeepAlive). Remove with `sudo scripts/macos/uninstall-egress-daemon.sh [--purge]`.
+- When the socket answers at startup, the app on 4317 does not open its own proxy listeners and shows the daemon's status. Without the daemon, the app runs the proxy in-process as before.
+- Who may change rules is decided from the kernel uid, not from the Origin header. On the socket the daemon reads the peer uid with `getpeereid`. On 4317 the app finds the uid of the TCP client from the kernel socket table (`net.inet.tcp.pcblist_n`, exact local and remote ports) or, for its own account, from `lsof`; a client it cannot identify counts as uid unknown.
+- Anyone may read the status. A change (enable, pause, rule, ports) applies at once only for an admin uid. Admins are root only by default (uid 0), so a change applies only through `sudo`; set `{"admins":[0,501]}` (uids) or `{"admins":"group:staff"}` in `daemon.json` in the daemon's data dir, or `LOCAL_WATCH_EGRESS_ADMINS`. A change from any other uid becomes a pending change with an id. It is applied only after an admin approves it: `local-network-watcher egress approve <id>` or `deny <id>`, or the Approve button on the Egress tab (only when the UI runs as an admin uid). Pending changes expire after 15 minutes (`LOCAL_WATCH_EGRESS_PENDING_TTL`, seconds). `local-network-watcher egress status` and `egress pending` read the daemon.
+- The daemon runs as `_localwatch`, and macOS shows a non-root process only its own sockets, so it cannot look up who opened a TCP connection. Give an untrusted account its own ports instead: `sudo scripts/macos/install-egress-daemon.sh --account alice` reserves 4320 (open) and 4321 (strict) for that uid in `daemon.json` (`"accountPorts"`). The port is the identity only while pf lets no other uid connect to it; without that rule anyone can be journaled as that account. Root and admin uids are never accepted. Connections on 4318 and 4319 are journaled with an unknown uid.
+- The journal records the client account (uid and name) for each proxy connection, and each change as pending, applied, approved, denied or expired.
+- DNS: the proxy resolves names itself, but a program that uses the system resolver sends DNS outside the proxy. `--dns` adds a root LaunchDaemon that runs `tcpdump -l -n -i pflog0 udp port 53` into `/var/log/local-watch-egress/dns.log` (root, group `_localwatch`, 0640, rotated by newsyslog). The daemon shows the query names as DNS entries marked "resolver, not proxied". pflog0 only sees packets that match a pf rule with the `log` keyword, so the pf rule that passes the agent account's DNS must carry `log`. That rule lives in the local OS configuration, not in this repository. Without pflog data the Egress tab says DNS visibility is off.
 
 ## Capture
 
@@ -83,13 +105,13 @@ Results are cached per binary path while the server runs. The card reports facts
 
 ## Persistence
 
-The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified, loaded or unloaded. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
-
+The Persistence tab lists launchd plists from `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons` via `GET /api/persistence`. Apple entries under `/System/Library` appear only when they match a networked process. Each entry shows Label, Program or ProgramArguments, RunAtLoad and KeepAlive, and is matched to processes with open connections by the PID from `launchctl list` or by executable path. Plists are parsed with `plutil` and never modified; only the actions below load or unload them. For testing, set `LOCAL_WATCH_PERSISTENCE_DIRS` to a colon-separated list of folders to scan instead.
 
 For your own LaunchAgents (`~/Library/LaunchAgents`) each card offers **Stop until next login** (`launchctl bootout`), **Stop and keep off** (`bootout` plus `launchctl disable`) and **Turn back on** (`enable` plus `bootstrap`). Every action needs a confirmation and is written to `actions.log`. Global agents and daemons in `/Library` need an administrator and are not changed; Apple jobs are never changed. For Homebrew services, `brew services stop <name>` does the same as Stop and keep off.
+
 ## Star Atlas and offline GeoIP
 
-The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local and multicast addresses get no location.
+The Star Atlas tab places open destinations on an equal-area world map. Locations come only from a local db-ip "IP to City Lite" file. The app never calls an online geolocation service and never looks up the public address of this Mac. Private, loopback, link-local, CGNAT and multicast addresses get no location.
 
 The database file is not in this repository. To add it:
 

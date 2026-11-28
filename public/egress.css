@@ -13,3 +13,5 @@
 .egress-table th,.egress-table td{text-align:left;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}
 .egress-table td small{display:block;color:var(--muted);white-space:normal}
 .egress-refused td:nth-child(3){font-weight:600}
+.egress-error{margin:0 0 12px;font-weight:600}
+.egress-ports{display:flex;gap:10px;align-items:center;margin-bottom:4px}.egress-ports input{width:160px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--sheet);color:var(--ink);font:inherit}

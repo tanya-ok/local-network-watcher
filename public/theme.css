@@ -49,3 +49,4 @@ body,.rail,.content,.topline,.summary,.view,.settings-sheet,.process-list,.event
 .security-stop:hover,.security-stop:focus-visible{background:color-mix(in srgb,var(--soft-rust) 60%,var(--sheet))}
 .security-marker>div:first-child span{color:var(--rust)}
 @media(max-width:700px){.topline-actions{align-items:flex-end;flex-direction:column;gap:7px}.theme-toggle{padding:6px 8px}}
+.connection-row:focus-visible{outline:2px solid currentColor;outline-offset:-2px}

@@ -27,7 +27,7 @@ const processPageSize = 25;
 let busy = false;
 
 function esc(value) {
-  return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 function stamp(process) {
   return Array.from(process || '?')[0].toUpperCase();
@@ -43,7 +43,7 @@ function renderConnections(rows) {
     const key = [row.pid, row.protocol, row.local, row.remote].join('|');
     const fresh = !known.has(key);
     const label = `${row.protocol || 'Network'} · PID ${row.pid}`;
-    return `<article class="connection-row${fresh ? ' first-seen' : ''}" data-first-seen="${fresh}" data-index="${rows.indexOf(row)}">
+    return `<article class="connection-row${fresh ? ' first-seen' : ''}" tabindex="0" data-first-seen="${fresh}" data-index="${rows.indexOf(row)}">
       <div class="process-cell"><span class="process-stamp">${esc(stamp(row.process))}</span><div><strong title="${esc(row.process)}">${esc(row.process)}</strong><small>${esc(label)}</small></div></div>
       <div class="route" aria-hidden="true"></div>
       <div class="remote-cell"><strong title="${esc(row.remote)}">${esc(row.remote)}</strong><small>Local ${esc(row.local)}</small></div>
@@ -206,6 +206,9 @@ window.addEventListener('hashchange', syncViewToHash);
 document.querySelector('#refresh').addEventListener('click', refresh);
 document.querySelector('#clear-events').addEventListener('click', () => { history.length = 0; renderEvents(); });
 filter.addEventListener('change', applyFilter);
+list.addEventListener('keydown', (event) => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.classList.contains('connection-row')) { event.preventDefault(); event.target.click(); }
+});
 list.addEventListener('click', (event) => {
   const card = event.target.closest('.connection-row');
   if (!card) return;
@@ -309,6 +312,7 @@ async function loadInterfaces() {
     cap.status.textContent = e.message || 'TShark is not available';
   }
 }
+let capRenderedCount = -1;
 async function pollCapture() {
   try {
     const res = await fetch('/api/capture', { cache: 'no-store' });
@@ -316,9 +320,11 @@ async function pollCapture() {
     capPackets = enrich(data.packets || []);
     if (data.state === 'running') {
       cap.status.textContent = `Capturing on ${data.interface} · ${capPackets.length} packets so far`;
-      renderCapture();
+      // Redraw only when new packets arrived, so a selected row and scroll position survive the poll.
+      if (capPackets.length !== capRenderedCount) { capRenderedCount = capPackets.length; renderCapture(); }
       return;
     }
+    capRenderedCount = -1;
     clearInterval(capPoll); capPoll = null; cap.start.disabled = false;
     cap.status.textContent = data.state === 'error' ? `Capture stopped: ${data.error}` : data.state === 'done' ? `Captured ${capPackets.length} packets in ${data.seconds} s on ${data.interface}` : 'No capture yet';
     renderCapture();
